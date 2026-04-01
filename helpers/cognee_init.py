@@ -206,7 +206,9 @@ async def init_cognee() -> None:
 
 
 def get_cognee():
-    """Get initialized cognee module. Raises RuntimeError if init_cognee() hasn't run."""
+    """Get initialized cognee module. Lazy-initializes on first call if needed."""
     if _cognee_module is None:
-        raise RuntimeError("Cognee not initialized — init_cognee() must succeed at startup")
+        configure_cognee()
+    if _cognee_module is None:
+        raise RuntimeError("Cognee could not be initialized — check logs for details")
     return _cognee_module, _search_type_class
