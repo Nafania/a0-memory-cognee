@@ -1,0 +1,55 @@
+from helpers import files
+from plugins._memory_cognee.helpers import memory
+from helpers.tool import Tool, Response
+from agent import Agent
+from helpers.log import LogItem
+
+
+class UpdateBehaviour(Tool):
+
+    async def execute(self, adjustments="", **kwargs):
+
+        if not isinstance(adjustments, str):
+            adjustments = str(adjustments)
+
+        await update_behaviour(self.agent, self.log, adjustments)
+        return Response(
+            message=self.agent.read_prompt("behaviour.updated.md"), break_loop=False
+        )
+
+
+async def update_behaviour(agent: Agent, log_item: LogItem, adjustments: str):
+
+    system = agent.read_prompt("behaviour.merge.sys.md")
+    current_rules = read_rules(agent)
+
+    async def log_callback(content):
+        log_item.stream(ruleset=content)
+
+    msg = agent.read_prompt(
+        "behaviour.merge.msg.md", current_rules=current_rules, adjustments=adjustments
+    )
+
+    adjustments_merge = await agent.call_utility_model(
+        system=system,
+        message=msg,
+        callback=log_callback,
+    )
+
+    rules_file = get_custom_rules_file(agent)
+    files.write_file(rules_file, adjustments_merge)
+    log_item.update(result="Behaviour updated")
+
+
+def get_custom_rules_file(agent: Agent):
+    return files.get_abs_path(memory.get_memory_subdir_abs(agent), "behaviour.md")
+
+
+def read_rules(agent: Agent):
+    rules_file = get_custom_rules_file(agent)
+    if files.exists(rules_file):
+        rules = agent.read_prompt(rules_file)
+        return agent.read_prompt("agent.system.behaviour.md", rules=rules)
+    else:
+        rules = agent.read_prompt("agent.system.behaviour_default.md")
+        return agent.read_prompt("agent.system.behaviour.md", rules=rules)
