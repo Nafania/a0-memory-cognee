@@ -361,8 +361,8 @@ def _subdir_to_dataset(memory_subdir: str) -> str:
 
 def _state_dir(memory_subdir: str) -> str:
     if memory_subdir.startswith("projects/"):
-        from helpers.projects import get_project_meta_folder
-        return files.get_abs_path(get_project_meta_folder(memory_subdir[9:]), "cognee_state")
+        from helpers.projects import get_project_meta
+        return files.get_abs_path(get_project_meta(memory_subdir[9:]), "cognee_state")
     return files.get_abs_path("usr/cognee_state", memory_subdir)
 
 
@@ -649,9 +649,9 @@ def abs_db_dir(memory_subdir: str) -> str:
 
 def abs_knowledge_dir(knowledge_subdir: str, *sub_dirs: str) -> str:
     if knowledge_subdir.startswith("projects/"):
-        from helpers.projects import get_project_meta_folder
+        from helpers.projects import get_project_meta
         return files.get_abs_path(
-            get_project_meta_folder(knowledge_subdir[9:]), "knowledge", *sub_dirs
+            get_project_meta(knowledge_subdir[9:]), "knowledge", *sub_dirs
         )
     if knowledge_subdir == "default":
         return files.get_abs_path("knowledge", *sub_dirs)
@@ -670,12 +670,15 @@ def get_agent_memory_subdir(agent: Agent) -> str:
 
 
 def get_context_memory_subdir(context: AgentContext) -> str:
-    from helpers.projects import get_context_project_name, load_basic_project_data
+    from helpers.projects import get_context_project_name, load_project_header
     project_name = get_context_project_name(context)
     if project_name:
-        project_data = load_basic_project_data(project_name)
-        if project_data.get("memory") == "own":
-            return "projects/" + project_name
+        try:
+            raw_header = load_project_header(project_name)
+            if raw_header.get("memory") == "own":
+                return "projects/" + project_name
+        except Exception:
+            pass
     from helpers import plugins
     cfg = plugins.get_plugin_config("_memory_cognee", agent=context.streaming_agent or context.agent0) or {}
     return cfg.get("memory_subdir", "default")
@@ -704,6 +707,6 @@ def get_knowledge_subdirs_by_memory_subdir(
 ) -> list[str]:
     result = list(default)
     if memory_subdir.startswith("projects/"):
-        from helpers.projects import get_project_meta_folder
-        result.append(get_project_meta_folder(memory_subdir[9:], "knowledge"))
+        from helpers.projects import get_project_meta
+        result.append(get_project_meta(memory_subdir[9:], "knowledge"))
     return result

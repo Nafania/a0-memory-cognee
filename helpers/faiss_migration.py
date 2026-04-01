@@ -300,8 +300,8 @@ async def migrate_index(
         if os.path.exists(knowledge_import_path):
             from helpers import files
             if memory_subdir.startswith("projects/"):
-                from helpers.projects import get_project_meta_folder
-                state_dir = files.get_abs_path(get_project_meta_folder(memory_subdir[9:]), "cognee_state")
+                from helpers.projects import get_project_meta
+                state_dir = files.get_abs_path(get_project_meta(memory_subdir[9:]), "cognee_state")
             else:
                 state_dir = files.get_abs_path("usr/cognee_state", memory_subdir)
             os.makedirs(state_dir, exist_ok=True)
