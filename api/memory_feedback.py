@@ -1,5 +1,5 @@
 from helpers.api import ApiHandler, Request, Response
-from usr.plugins._memory_cognee.helpers import cognee_feedback as cf
+from usr.plugins.memory_cognee.helpers import cognee_feedback as cf
 
 
 class MemoryFeedback(ApiHandler):

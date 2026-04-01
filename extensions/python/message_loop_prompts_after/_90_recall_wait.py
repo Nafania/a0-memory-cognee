@@ -2,13 +2,13 @@ import asyncio
 from helpers.extension import Extension
 from helpers.print_style import PrintStyle
 from agent import LoopData
-from usr.plugins._memory_cognee.extensions.python.message_loop_prompts_after._50_recall_memories import DATA_NAME_TASK as DATA_NAME_TASK_MEMORIES, DATA_NAME_ITER as DATA_NAME_ITER_MEMORIES
+from usr.plugins.memory_cognee.extensions.python.message_loop_prompts_after._50_recall_memories import DATA_NAME_TASK as DATA_NAME_TASK_MEMORIES, DATA_NAME_ITER as DATA_NAME_ITER_MEMORIES
 from helpers import plugins
 
 class RecallWait(Extension):
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
 
-        cfg = plugins.get_plugin_config("_memory_cognee", self.agent)
+        cfg = plugins.get_plugin_config("memory_cognee", self.agent)
         if not cfg:
             return
 

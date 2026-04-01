@@ -1,4 +1,4 @@
-# _memory_cognee — Cognee-backed Memory Plugin for Agent Zero
+# memory_cognee — Cognee-backed Memory Plugin for Agent Zero
 
 Replaces the builtin FAISS-based `_memory` plugin with a [Cognee](https://github.com/topoteretes/cognee) backend, providing knowledge-graph-powered memory with background processing, consolidation, and feedback.
 
@@ -32,7 +32,7 @@ curl -X POST "$BASE/api/plugins/_plugin_installer/plugin_install" \
 ### Manual (last resort)
 
 ```bash
-git clone https://github.com/<user>/a0-memory-cognee /a0/usr/plugins/_memory_cognee
+git clone https://github.com/<user>/a0-memory-cognee /a0/usr/plugins/memory_cognee
 ```
 
 Then restart Agent Zero or toggle the plugin off/on in **Settings → Plugins**.

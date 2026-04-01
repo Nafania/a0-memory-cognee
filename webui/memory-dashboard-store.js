@@ -3,7 +3,7 @@ import { getContext } from "/index.js";
 import * as API from "/js/api.js";
 import { openModal, closeModal } from "/js/modals.js";
 import { store as notificationStore } from "/components/notifications/notification-store.js";
-const MEMORY_DASHBOARD_API = "/plugins/_memory_cognee/memory_dashboard";
+const MEMORY_DASHBOARD_API = "/plugins/memory_cognee/memory_dashboard";
 
 // Helper function for toasts
 function justToast(text, type = "info", timeout = 5000) {
@@ -53,7 +53,7 @@ const memoryDashboardStore = {
   pollingEnabled: false,
 
   async openModal() {
-    await openModal("/plugins/_memory_cognee/webui/memory-dashboard.html");
+    await openModal("/plugins/memory_cognee/webui/memory-dashboard.html");
   },
 
   init() {
@@ -409,7 +409,7 @@ ${memory.content_full}
     this.detailMemory = memory;
     this.editMode = false;
     this.editMemoryBackup = null;
-    openModal("/plugins/_memory_cognee/webui/memory-detail-modal.html");
+    openModal("/plugins/memory_cognee/webui/memory-detail-modal.html");
   },
 
   closeMemoryDetails() {

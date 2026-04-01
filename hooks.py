@@ -34,7 +34,7 @@ def install():
 
     # 3. Migrate FAISS data if present
     try:
-        from usr.plugins._memory_cognee.helpers.faiss_migration import migrate
+        from usr.plugins.memory_cognee.helpers.faiss_migration import migrate
         migrate()
     except Exception as e:
         from helpers.print_style import PrintStyle

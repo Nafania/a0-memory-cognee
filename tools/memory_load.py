@@ -1,4 +1,4 @@
-from usr.plugins._memory_cognee.helpers.memory import Memory
+from usr.plugins.memory_cognee.helpers.memory import Memory
 from helpers.tool import Tool, Response
 
 DEFAULT_THRESHOLD = 0.7

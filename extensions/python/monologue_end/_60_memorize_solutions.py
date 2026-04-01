@@ -1,6 +1,6 @@
 from helpers import plugins, errors
 from helpers.extension import Extension
-from usr.plugins._memory_cognee.helpers.memory import Memory
+from usr.plugins.memory_cognee.helpers.memory import Memory
 from helpers.dirty_json import DirtyJson
 from agent import LoopData
 from helpers.log import LogItem
@@ -10,7 +10,7 @@ from helpers.defer import DeferredTask, THREAD_BACKGROUND
 class MemorizeSolutions(Extension):
 
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
-        cfg = plugins.get_plugin_config("_memory_cognee", self.agent)
+        cfg = plugins.get_plugin_config("memory_cognee", self.agent)
         if not cfg:
             return
 

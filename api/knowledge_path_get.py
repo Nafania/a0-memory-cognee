@@ -1,6 +1,6 @@
 from helpers.api import ApiHandler, Request, Response
 from helpers import files, projects
-from usr.plugins._memory_cognee.helpers import memory
+from usr.plugins.memory_cognee.helpers import memory
 
 
 class GetKnowledgePath(ApiHandler):

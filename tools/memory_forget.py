@@ -1,5 +1,5 @@
-from usr.plugins._memory_cognee.helpers.memory import Memory
-from usr.plugins._memory_cognee.tools.memory_load import DEFAULT_THRESHOLD
+from usr.plugins.memory_cognee.helpers.memory import Memory
+from usr.plugins.memory_cognee.tools.memory_load import DEFAULT_THRESHOLD
 from helpers.tool import Tool, Response
 
 

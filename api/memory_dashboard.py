@@ -1,7 +1,7 @@
 import time as _time
 
 from helpers.api import ApiHandler, Request, Response
-from usr.plugins._memory_cognee.helpers.memory import Memory, get_existing_memory_subdirs, get_context_memory_subdir, read_data_item_content
+from usr.plugins.memory_cognee.helpers.memory import Memory, get_existing_memory_subdirs, get_context_memory_subdir, read_data_item_content
 from helpers import files
 from helpers.print_style import PrintStyle
 from langchain_core.documents import Document
@@ -20,7 +20,7 @@ class MemoryDashboard(ApiHandler):
 
     async def process(self, input: dict, request: Request) -> dict | Response:
         try:
-            from usr.plugins._memory_cognee.helpers.memory import _get_cognee
+            from usr.plugins.memory_cognee.helpers.memory import _get_cognee
             _get_cognee()
             action = input.get("action", "search")
             if action == "get_memory_subdirs":
@@ -188,7 +188,7 @@ class MemoryDashboard(ApiHandler):
             memories = []
             try:
                 import cognee
-                from usr.plugins._memory_cognee.helpers.memory import _extract_metadata_from_text
+                from usr.plugins.memory_cognee.helpers.memory import _extract_metadata_from_text
                 from helpers import guids
 
                 all_datasets = await cognee.datasets.list_datasets()
@@ -296,7 +296,7 @@ class MemoryDashboard(ApiHandler):
 
     async def _get_cognify_status(self) -> dict:
         try:
-            from usr.plugins._memory_cognee.helpers.cognee_background import CogneeBackgroundWorker
+            from usr.plugins.memory_cognee.helpers.cognee_background import CogneeBackgroundWorker
             status = CogneeBackgroundWorker.get_instance().get_status()
             return {"success": True, **status}
         except Exception as e:

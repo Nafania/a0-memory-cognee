@@ -617,7 +617,7 @@ async def _delete_data_by_id(dataset_name: str, data_id: str):
 
 def _invalidate_dashboard_cache():
     try:
-        from usr.plugins._memory_cognee.api.memory_dashboard import invalidate_dashboard_cache
+        from usr.plugins.memory_cognee.api.memory_dashboard import invalidate_dashboard_cache
         invalidate_dashboard_cache()
     except Exception:
         pass
@@ -680,7 +680,7 @@ def get_context_memory_subdir(context: AgentContext) -> str:
         except Exception:
             pass
     from helpers import plugins
-    cfg = plugins.get_plugin_config("_memory_cognee", agent=context.streaming_agent or context.agent0) or {}
+    cfg = plugins.get_plugin_config("memory_cognee", agent=context.streaming_agent or context.agent0) or {}
     return cfg.get("memory_subdir", "default")
 
 

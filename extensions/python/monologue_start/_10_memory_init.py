@@ -1,6 +1,6 @@
 from helpers.extension import Extension
 from agent import LoopData
-from usr.plugins._memory_cognee.helpers import memory
+from usr.plugins.memory_cognee.helpers import memory
 import asyncio
 
 

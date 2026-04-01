@@ -1,6 +1,6 @@
 import asyncio
 from helpers.extension import Extension
-from usr.plugins._memory_cognee.helpers.memory import Memory, recall_text_and_feedback_items
+from usr.plugins.memory_cognee.helpers.memory import Memory, recall_text_and_feedback_items
 from agent import LoopData
 from helpers import plugins, log
 from helpers.print_style import PrintStyle
@@ -13,7 +13,7 @@ SEARCH_TIMEOUT = 30
 class RecallMemories(Extension):
 
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
-        cfg = plugins.get_plugin_config("_memory_cognee", self.agent)
+        cfg = plugins.get_plugin_config("memory_cognee", self.agent)
         if not cfg:
             return
 
@@ -45,7 +45,7 @@ class RecallMemories(Extension):
         if "solutions" in extras:
             del extras["solutions"]
 
-        cfg = plugins.get_plugin_config("_memory_cognee", self.agent)
+        cfg = plugins.get_plugin_config("memory_cognee", self.agent)
         if not cfg:
             return
 
@@ -62,7 +62,7 @@ class RecallMemories(Extension):
             )
             return
 
-        from usr.plugins._memory_cognee.helpers.cognee_init import get_cognee
+        from usr.plugins.memory_cognee.helpers.cognee_init import get_cognee
         cognee, _ = get_cognee()
         from cognee.modules.engine.models.node_set import NodeSet
 
