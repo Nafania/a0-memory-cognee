@@ -20,8 +20,15 @@ def install():
 
     # 3. Migrate FAISS data if present
     try:
-        from .helpers.faiss_migration import migrate
-        migrate()
+        import os, importlib.util
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location(
+            "faiss_migration",
+            os.path.join(plugin_dir, "helpers", "faiss_migration.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.migrate()
     except Exception as e:
         from helpers.print_style import PrintStyle
         PrintStyle.warning(f"FAISS migration skipped: {e}")

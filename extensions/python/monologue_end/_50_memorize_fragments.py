@@ -1,6 +1,6 @@
 from helpers import plugins, errors
 from helpers.extension import Extension
-from plugins._memory_cognee.helpers.memory import Memory
+from usr.plugins._memory_cognee.helpers.memory import Memory
 from helpers.dirty_json import DirtyJson
 from agent import LoopData
 from helpers.log import LogItem

@@ -2,7 +2,7 @@ from datetime import datetime
 from helpers.extension import Extension
 from agent import Agent, LoopData
 from helpers import files
-from plugins._memory_cognee.helpers import memory
+from usr.plugins._memory_cognee.helpers import memory
 
 
 class BehaviourPrompt(Extension):

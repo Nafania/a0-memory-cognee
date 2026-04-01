@@ -1,6 +1,6 @@
 from helpers.api import ApiHandler, Request, Response
 from helpers import files
-from plugins._memory_cognee.helpers import memory
+from usr.plugins._memory_cognee.helpers import memory
 import os
 from helpers.security import safe_filename
 

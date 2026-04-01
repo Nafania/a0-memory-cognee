@@ -1,6 +1,6 @@
 import asyncio
 from helpers.extension import Extension
-from plugins._memory_cognee.helpers.memory import Memory, recall_text_and_feedback_items
+from usr.plugins._memory_cognee.helpers.memory import Memory, recall_text_and_feedback_items
 from agent import LoopData
 from helpers import plugins, log
 from helpers.print_style import PrintStyle
@@ -62,7 +62,7 @@ class RecallMemories(Extension):
             )
             return
 
-        from plugins._memory_cognee.helpers.cognee_init import get_cognee
+        from usr.plugins._memory_cognee.helpers.cognee_init import get_cognee
         cognee, _ = get_cognee()
         from cognee.modules.engine.models.node_set import NodeSet
 

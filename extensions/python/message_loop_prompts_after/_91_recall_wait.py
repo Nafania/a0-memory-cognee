@@ -2,7 +2,7 @@ import asyncio
 from helpers.extension import Extension
 from helpers.print_style import PrintStyle
 from agent import LoopData
-from plugins._memory_cognee.extensions.python.message_loop_prompts_after._50_recall_memories import DATA_NAME_TASK as DATA_NAME_TASK_MEMORIES, DATA_NAME_ITER as DATA_NAME_ITER_MEMORIES
+from usr.plugins._memory_cognee.extensions.python.message_loop_prompts_after._50_recall_memories import DATA_NAME_TASK as DATA_NAME_TASK_MEMORIES, DATA_NAME_ITER as DATA_NAME_ITER_MEMORIES
 from helpers import plugins
 
 class RecallWait(Extension):

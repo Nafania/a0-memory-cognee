@@ -12,7 +12,7 @@ from helpers.dirty_json import DirtyJson
 from helpers.log import LogItem
 from helpers.print_style import PrintStyle
 from agent import Agent
-from plugins._memory_cognee.tools.memory_load import DEFAULT_THRESHOLD as DEFAULT_MEMORY_THRESHOLD
+from usr.plugins._memory_cognee.tools.memory_load import DEFAULT_THRESHOLD as DEFAULT_MEMORY_THRESHOLD
 
 
 class ConsolidationAction(Enum):

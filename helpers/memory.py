@@ -617,7 +617,7 @@ async def _delete_data_by_id(dataset_name: str, data_id: str):
 
 def _invalidate_dashboard_cache():
     try:
-        from plugins._memory_cognee.api.memory_dashboard import invalidate_dashboard_cache
+        from usr.plugins._memory_cognee.api.memory_dashboard import invalidate_dashboard_cache
         invalidate_dashboard_cache()
     except Exception:
         pass
