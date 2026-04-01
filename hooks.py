@@ -2,10 +2,24 @@ import subprocess
 import sys
 
 def install():
-    # 1. Install Cognee
-    subprocess.check_call([
-        sys.executable, "-m", "pip", "install", "cognee[fastembed]"
-    ])
+    # 1. Snapshot openai version before cognee install to prevent breakage
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "show", "openai"],
+        capture_output=True, text=True
+    )
+    pinned_openai = ""
+    for line in result.stdout.splitlines():
+        if line.startswith("Version:"):
+            ver = line.split(":", 1)[1].strip()
+            major = int(ver.split(".")[0])
+            pinned_openai = f"openai=={ver}" if major < 2 else f"openai<{major + 1}"
+            break
+
+    # Install cognee while keeping openai compatible with litellm
+    cmd = [sys.executable, "-m", "pip", "install", "cognee[fastembed]"]
+    if pinned_openai:
+        cmd.append(pinned_openai)
+    subprocess.check_call(cmd)
 
     # 2. Disable builtin _memory
     try:
