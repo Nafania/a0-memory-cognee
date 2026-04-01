@@ -13,21 +13,6 @@
                     context awareness.
                 </div>
 
-                <div class="field" x-show="context.projectName">
-                    <div class="field-label">
-                        <div class="field-title">Project Isolation</div>
-                        <div class="field-description">
-                            If enabled, this project uses its own memory folder (projects/NAME). If disabled, it shares the global memory (default or custom subdir).
-                        </div>
-                    </div>
-                    <div class="field-control">
-                        <label class="toggle">
-                            <input type="checkbox" x-model="config.project_memory_isolation" />
-                            <span class="toggler"></span>
-                        </label>
-                    </div>
-                </div>
-
                 <div class="field">
                     <div class="field-label">
                         <div class="field-title">Memory Subdirectory</div>
@@ -81,39 +66,6 @@
                     <div class="field-control">
                         <label class="toggle">
                             <input type="checkbox" x-model="config.memory_recall_delayed" />
-                            <span class="toggler"></span>
-                        </label>
-                    </div>
-                </div>
-
-                <div class="field">
-                    <div class="field-label">
-                        <div class="field-title">Auto-recall AI query preparation</div>
-                        <div class="field-description">
-                            Enables vector DB query preparation from conversation context by utility LLM for
-                            auto-recall. Improves search quality, adds 1 utility LLM call per auto-recall.
-                        </div>
-                    </div>
-                    <div class="field-control">
-                        <label class="toggle">
-                            <input type="checkbox" x-model="config.memory_recall_query_prep" />
-                            <span class="toggler"></span>
-                        </label>
-                    </div>
-                </div>
-
-                <div class="field">
-                    <div class="field-label">
-                        <div class="field-title">Auto-recall AI post-filtering</div>
-                        <div class="field-description">
-                            Enables memory relevance filtering by utility LLM for auto-recall. Improves search quality,
-                            adds 1 utility LLM call per auto-recall.
-                        </div>
-                    </div>
-                    <div class="field-control">
-                        <label class="toggle">
-                            <input type="checkbox"
-                                x-model="config.memory_recall_post_filter" />
                             <span class="toggler"></span>
                         </label>
                     </div>

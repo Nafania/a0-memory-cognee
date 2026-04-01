@@ -150,48 +150,6 @@ class MemoryConsolidator:
                 similar_memories_count=len(similar_memories)
             )
 
-        if similar_memories:
-            memory_ids_to_check = [doc.metadata.get('id') for doc in similar_memories if doc.metadata.get('id')]
-            memory_ids_to_check = [str(id) for id in memory_ids_to_check if id is not None]
-            db = await Memory.get(self.agent)
-            still_existing = db.db.get_by_ids(memory_ids_to_check)
-            existing_ids = {doc.metadata.get('id') for doc in still_existing}
-
-            valid_similar_memories = [doc for doc in similar_memories if doc.metadata.get('id') in existing_ids]
-
-            if len(valid_similar_memories) != len(similar_memories):
-                deleted_count = len(similar_memories) - len(valid_similar_memories)
-                if log_item:
-                    log_item.update(
-                        progress=f"Filtered out {deleted_count} deleted memories, {len(valid_similar_memories)} remain for analysis",
-                        race_condition_detected=True,
-                        deleted_similar_memories_count=deleted_count
-                    )
-                similar_memories = valid_similar_memories
-
-        if not similar_memories:
-            if log_item:
-                log_item.update(
-                    progress="No valid similar memories remain, inserting new memory",
-                )
-            try:
-                db = await Memory.get(self.agent)
-                if 'timestamp' not in metadata:
-                    metadata['timestamp'] = self._get_timestamp()
-                memory_id = await db.insert_text(new_memory, metadata)
-                if log_item:
-                    log_item.update(
-                        result="Memory inserted successfully (no valid similar memories)",
-                        memory_ids=[memory_id],
-                        consolidation_action="direct_insert_filtered"
-                    )
-                return {"success": True, "memory_ids": [memory_id]}
-            except Exception as e:
-                PrintStyle().error(f"Direct memory insertion failed: {str(e)}")
-                if log_item:
-                    log_item.update(result=f"Memory insertion failed: {str(e)}")
-                return {"success": False, "memory_ids": []}
-
         analysis_context = MemoryAnalysisContext(
             new_memory=new_memory,
             similar_memories=similar_memories,
@@ -228,6 +186,7 @@ class MemoryConsolidator:
 
         memory_ids = await self._apply_consolidation_result(
             consolidation_result,
+            similar_memories,
             area,
             analysis_context.existing_metadata,
             log_item
@@ -251,40 +210,35 @@ class MemoryConsolidator:
 
         return {"success": bool(memory_ids), "memory_ids": memory_ids or []}
 
-    async def _gather_consolidated_metadata(
+    def _gather_consolidated_metadata(
         self,
-        db: Memory,
+        similar_memories: List[Document],
         result: ConsolidationResult,
         original_metadata: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Gather and merge metadata from memories being consolidated to preserve important fields."""
+        """Gather and merge metadata from similar memories found during search."""
         try:
             consolidated_metadata = dict(original_metadata)
 
-            memory_ids = []
-
+            ids_involved: set = set()
             if result.memories_to_remove:
-                memory_ids.extend(result.memories_to_remove)
-
+                ids_involved.update(result.memories_to_remove)
             if result.memories_to_update:
                 for update_info in result.memories_to_update:
-                    memory_id = update_info.get('id')
-                    if memory_id:
-                        memory_ids.append(memory_id)
+                    mid = update_info.get('id')
+                    if mid:
+                        ids_involved.add(mid)
 
-            if memory_ids:
-                original_memories = await db.db.aget_by_ids(memory_ids)
-
-                for memory in original_memories:
-                    memory_metadata = memory.metadata
-
-                    for field_name, field_value in memory_metadata.items():
+            for doc in similar_memories:
+                doc_id = doc.metadata.get('id')
+                if doc_id and doc_id in ids_involved:
+                    for field_name, field_value in doc.metadata.items():
+                        if field_name.startswith('_'):
+                            continue
                         if field_name not in consolidated_metadata:
                             consolidated_metadata[field_name] = field_value
-                        elif field_name in consolidated_metadata:
-                            if field_name == 'tags' and isinstance(field_value, list) and isinstance(consolidated_metadata[field_name], list):
-                                merged_tags = list(set(consolidated_metadata[field_name] + field_value))
-                                consolidated_metadata[field_name] = merged_tags
+                        elif field_name == 'tags' and isinstance(field_value, list) and isinstance(consolidated_metadata[field_name], list):
+                            consolidated_metadata[field_name] = list(set(consolidated_metadata[field_name] + field_value))
 
             return consolidated_metadata
 
@@ -469,6 +423,7 @@ class MemoryConsolidator:
     async def _apply_consolidation_result(
         self,
         result: ConsolidationResult,
+        similar_memories: List[Document],
         area: str,
         original_metadata: Dict[str, Any],
         log_item: Optional[LogItem] = None
@@ -478,7 +433,7 @@ class MemoryConsolidator:
         try:
             db = await Memory.get(self.agent)
 
-            consolidated_metadata = await self._gather_consolidated_metadata(db, result, original_metadata)
+            consolidated_metadata = self._gather_consolidated_metadata(similar_memories, result, original_metadata)
 
             if result.action == ConsolidationAction.KEEP_SEPARATE:
                 return await self._handle_keep_separate(db, result, area, consolidated_metadata, log_item)
@@ -546,42 +501,7 @@ class MemoryConsolidator:
         self, db: Memory, result: ConsolidationResult, area: str,
         original_metadata: Dict[str, Any], log_item: Optional[LogItem] = None
     ) -> list:
-        """Handle REPLACE action: Remove old memories, insert new version with similarity validation."""
-        if result.memories_to_remove:
-            memories_to_check = await db.db.aget_by_ids(result.memories_to_remove)
-
-            unsafe_replacements = []
-            for memory in memories_to_check:
-                similarity = memory.metadata.get('_consolidation_similarity', 0.7)
-                if similarity < self.config.replace_similarity_threshold:
-                    unsafe_replacements.append({
-                        'id': memory.metadata.get('id'),
-                        'similarity': similarity,
-                        'content_preview': memory.page_content[:100]
-                    })
-
-            if unsafe_replacements:
-                PrintStyle().warning(
-                    f"REPLACE blocked: {len(unsafe_replacements)} memories below "
-                    f"similarity threshold {self.config.replace_similarity_threshold}, converting to KEEP_SEPARATE"
-                )
-
-                if result.new_memory_content:
-                    final_metadata = {
-                        'area': area,
-                        'timestamp': self._get_timestamp(),
-                        'consolidation_action': 'keep_separate_safety',
-                        'original_action': 'replace',
-                        'safety_reason': f'Similarity below threshold {self.config.replace_similarity_threshold}',
-                        **original_metadata,
-                        **result.metadata
-                    }
-
-                    new_id = await db.insert_text(result.new_memory_content, final_metadata)
-                    return [new_id]
-                else:
-                    return []
-
+        """Handle REPLACE action: Remove old memories, insert new version."""
         if result.memories_to_remove:
             await db.delete_documents_by_ids(result.memories_to_remove)
 
@@ -605,7 +525,6 @@ class MemoryConsolidator:
         original_metadata: Dict[str, Any], log_item: Optional[LogItem] = None
     ) -> list:
         """Handle UPDATE action: Modify existing memories in place with additional information."""
-        updated_count = 0
         updated_ids = []
 
         for update_info in result.memories_to_update:
@@ -613,11 +532,6 @@ class MemoryConsolidator:
             new_content = update_info.get('new_content', '')
 
             if memory_id and new_content:
-                existing_docs = await db.db.aget_by_ids([memory_id])
-                if not existing_docs:
-                    PrintStyle().warning(f"Memory ID {memory_id} not found during update, skipping")
-                    continue
-
                 await db.delete_documents_by_ids([memory_id])
 
                 updated_metadata = {

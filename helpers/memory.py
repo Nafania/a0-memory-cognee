@@ -681,7 +681,7 @@ def get_context_memory_subdir(context: AgentContext) -> str:
             pass
     from helpers import plugins
     cfg = plugins.get_plugin_config("memory_cognee", agent=context.streaming_agent or context.agent0) or {}
-    return cfg.get("memory_subdir", "default")
+    return cfg.get("agent_memory_subdir", "default")
 
 
 def get_existing_memory_subdirs() -> list[str]:
@@ -710,3 +710,30 @@ def get_knowledge_subdirs_by_memory_subdir(
         from helpers.projects import get_project_meta
         result.append(get_project_meta(memory_subdir[9:], "knowledge"))
     return result
+
+
+async def insert_with_simple_dedup(
+    db: "Memory", text: str, area: str, threshold: float
+) -> str | None:
+    """Skip insert if a near-identical memory already exists above *threshold*.
+
+    Provides a lightweight semantic dedup when full LLM consolidation is disabled.
+    Cognee already handles exact content-hash dedup at the ``add()`` level;
+    this catches semantically near-identical fragments that differ in wording.
+    """
+    try:
+        existing = await db.search_similarity_threshold(
+            query=text,
+            limit=1,
+            threshold=threshold,
+            filter=f"area == '{area}'",
+            include_default=False,
+        )
+        if existing:
+            PrintStyle(font_color="gray").print(
+                f"Skipping duplicate memory (area={area}): {text[:80]}..."
+            )
+            return None
+    except Exception:
+        pass
+    return await db.insert_text(text=text, metadata={"area": area})

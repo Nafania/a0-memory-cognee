@@ -1,6 +1,6 @@
 from helpers import plugins, errors
 from helpers.extension import Extension
-from usr.plugins.memory_cognee.helpers.memory import Memory
+from usr.plugins.memory_cognee.helpers.memory import Memory, insert_with_simple_dedup
 from helpers.dirty_json import DirtyJson
 from agent import LoopData
 from helpers.log import LogItem
@@ -25,10 +25,10 @@ class MemorizeMemories(Extension):
         )
 
         task = DeferredTask(thread_name=THREAD_BACKGROUND)
-        task.start_task(self.memorize, loop_data, log_item, db)
+        task.start_task(self.memorize, loop_data, log_item, db, cfg)
         return task
 
-    async def memorize(self, loop_data: LoopData, log_item: LogItem, db: Memory, **kwargs):
+    async def memorize(self, loop_data: LoopData, log_item: LogItem, db: Memory, cfg: dict, **kwargs):
         try:
             system = self.agent.read_prompt("memory.memories_sum.sys.md")
             msgs_text = self.agent.concat_messages(self.agent.history)
@@ -75,9 +75,29 @@ class MemorizeMemories(Extension):
                 memories_txt = "\n\n".join([str(memory) for memory in memories]).strip()
                 log_item.update(heading=f"{len(memories)} entries to memorize.", memories=memories_txt)
 
-            for memory in memories:
-                txt = f"{memory}"
-                await db.insert_text(text=txt, metadata={"area": Memory.Area.FRAGMENTS.value})
+            use_consolidation = cfg.get("memory_memorize_consolidation", False)
+            replace_threshold = cfg.get("memory_memorize_replace_threshold", 0.9)
+            area = Memory.Area.FRAGMENTS.value
+
+            if use_consolidation:
+                from usr.plugins.memory_cognee.helpers.memory_consolidation import create_memory_consolidator
+                consolidator = create_memory_consolidator(
+                    self.agent,
+                    similarity_threshold=cfg.get("memory_recall_similarity_threshold", 0.7),
+                    replace_similarity_threshold=replace_threshold,
+                )
+                for memory in memories:
+                    txt = f"{memory}"
+                    await consolidator.process_new_memory(
+                        new_memory=txt,
+                        area=area,
+                        metadata={"area": area},
+                        log_item=log_item,
+                    )
+            else:
+                for memory in memories:
+                    txt = f"{memory}"
+                    await insert_with_simple_dedup(db, txt, area, replace_threshold)
 
             log_item.update(
                 result=f"{len(memories)} entries memorized.",
