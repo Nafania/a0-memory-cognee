@@ -74,13 +74,8 @@
                     <span x-show="$store.memoryDashboardStore.initializingMemory">Initializing memory database...</span>
                 </div>
 
-                <!-- Error state -->
-                <div x-show="$store.memoryDashboardStore.error" class="error-state">
-                    <span x-text="$store.memoryDashboardStore.error"></span>
-                </div>
-
                 <!-- Memory table -->
-                <div x-show="!$store.memoryDashboardStore.loading && !$store.memoryDashboardStore.error"
+                <div x-show="!$store.memoryDashboardStore.loading"
                     class="data-table-container data-table-container-standalone memory-table-container">
 
                     <!-- Status Bar -->

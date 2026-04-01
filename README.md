@@ -50,4 +50,4 @@ All settings are in `default_config.yaml` and can be overridden per-project or p
 
 ## License
 
-Same license as the parent Agent Zero project.
+Apache License 2.0 — see [LICENSE](LICENSE).

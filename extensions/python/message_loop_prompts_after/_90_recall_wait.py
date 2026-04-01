@@ -8,8 +8,8 @@ from helpers import plugins
 class RecallWait(Extension):
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
 
-        set = plugins.get_plugin_config("_memory_cognee", self.agent)
-        if not set:
+        cfg = plugins.get_plugin_config("_memory_cognee", self.agent)
+        if not cfg:
             return
 
         task = self.agent.get_data(DATA_NAME_TASK_MEMORIES)
@@ -17,7 +17,7 @@ class RecallWait(Extension):
 
         if task and not task.done():
 
-            if set["memory_recall_delayed"]:
+            if cfg["memory_recall_delayed"]:
                 if iter == loop_data.iteration:
                     delay_text = self.agent.read_prompt("memory.recall_delay_msg.md")
                     loop_data.extras_temporary["memory_recall_delayed"] = delay_text

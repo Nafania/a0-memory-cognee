@@ -7,7 +7,7 @@ from helpers.log import LogItem
 
 class UpdateBehaviour(Tool):
 
-    async def execute(self, adjustments="", **kwargs):
+    async def execute(self, adjustments="", **kwargs) -> Response:
 
         if not isinstance(adjustments, str):
             adjustments = str(adjustments)

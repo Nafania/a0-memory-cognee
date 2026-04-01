@@ -4,7 +4,7 @@ from helpers.tool import Tool, Response
 
 class MemoryDelete(Tool):
 
-    async def execute(self, ids="", **kwargs):
+    async def execute(self, ids="", **kwargs) -> Response:
         db = await Memory.get(self.agent)
         ids = [id.strip() for id in ids.split(",") if id.strip()]
         dels = await db.delete_documents_by_ids(ids=ids)

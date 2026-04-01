@@ -1,7 +1,5 @@
 from helpers.api import ApiHandler, Request, Response
-from helpers import files, notification, projects, notification
 from usr.plugins._memory_cognee.helpers import memory
-import os
 
 
 class ReindexKnowledge(ApiHandler):

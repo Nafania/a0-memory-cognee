@@ -13,14 +13,14 @@ SEARCH_TIMEOUT = 30
 class RecallMemories(Extension):
 
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
-        set = plugins.get_plugin_config("_memory_cognee", self.agent)
-        if not set:
+        cfg = plugins.get_plugin_config("_memory_cognee", self.agent)
+        if not cfg:
             return
 
-        if not set["memory_recall_enabled"]:
+        if not cfg["memory_recall_enabled"]:
             return
 
-        if loop_data.iteration % set["memory_recall_interval"] == 0:
+        if loop_data.iteration % cfg["memory_recall_interval"] == 0:
             log_item = self.agent.context.log.log(
                 type="util",
                 heading="Searching memories...",
@@ -45,14 +45,14 @@ class RecallMemories(Extension):
         if "solutions" in extras:
             del extras["solutions"]
 
-        set = plugins.get_plugin_config("_memory_cognee", self.agent)
-        if not set:
+        cfg = plugins.get_plugin_config("_memory_cognee", self.agent)
+        if not cfg:
             return
 
         user_instruction = (
             loop_data.user_message.output_text() if loop_data.user_message else "None"
         )
-        history = self.agent.history.output_text()[-set["memory_recall_history_len"]:]
+        history = self.agent.history.output_text()[-cfg["memory_recall_history_len"]:]
 
         query = user_instruction + "\n\n" + history
 
@@ -77,7 +77,7 @@ class RecallMemories(Extension):
             mem_answers, sol_answers = await asyncio.gather(
                 cognee.search(
                     query_text=query,
-                    top_k=set["memory_recall_memories_max_search"],
+                    top_k=cfg["memory_recall_memories_max_search"],
                     datasets=datasets,
                     node_type=NodeSet,
                     node_name=mem_node_name,
@@ -87,7 +87,7 @@ class RecallMemories(Extension):
                 ),
                 cognee.search(
                     query_text=query,
-                    top_k=set["memory_recall_solutions_max_search"],
+                    top_k=cfg["memory_recall_solutions_max_search"],
                     datasets=datasets,
                     node_type=NodeSet,
                     node_name=sol_node_name,
@@ -113,14 +113,14 @@ class RecallMemories(Extension):
         fb_fallback = db.dataset_name
         memories, mem_fb = recall_text_and_feedback_items(
             mem_answers,
-            set["memory_recall_memories_max_result"],
+            cfg["memory_recall_memories_max_result"],
             context_id=ctx,
             fallback_dataset=fb_fallback,
             kind="memory",
         )
         solutions, sol_fb = recall_text_and_feedback_items(
             sol_answers,
-            set["memory_recall_solutions_max_result"],
+            cfg["memory_recall_solutions_max_result"],
             context_id=ctx,
             fallback_dataset=fb_fallback,
             kind="solution",

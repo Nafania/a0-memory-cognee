@@ -1,8 +1,6 @@
 from helpers.api import ApiHandler, Request, Response
-from helpers import files, notification, projects, notification
+from helpers import files, projects
 from usr.plugins._memory_cognee.helpers import memory
-import os
-from werkzeug.utils import secure_filename
 
 
 class GetKnowledgePath(ApiHandler):

@@ -10,11 +10,11 @@ from helpers.defer import DeferredTask, THREAD_BACKGROUND
 class MemorizeSolutions(Extension):
 
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
-        set = plugins.get_plugin_config("_memory_cognee", self.agent)
-        if not set:
+        cfg = plugins.get_plugin_config("_memory_cognee", self.agent)
+        if not cfg:
             return
 
-        if not set["memory_memorize_enabled"]:
+        if not cfg["memory_memorize_enabled"]:
             return
 
         db = await Memory.get(self.agent)

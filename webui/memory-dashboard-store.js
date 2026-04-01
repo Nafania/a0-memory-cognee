@@ -21,7 +21,6 @@ const memoryDashboardStore = {
   loading: false,
   loadingSubdirs: false,
   initializingMemory: false,
-  error: null,
   message: null,
 
   // Memory subdirectories
@@ -94,7 +93,6 @@ const memoryDashboardStore = {
 
   async loadMemorySubdirs() {
     this.loadingSubdirs = true;
-    this.error = null;
 
     try {
       const response = await API.callJsonApi(MEMORY_DASHBOARD_API, {
@@ -117,12 +115,12 @@ const memoryDashboardStore = {
           this.selectedMemorySubdir = "default";
         }
       } else {
-        this.error = response.error || "Failed to load memory subdirectories";
+        justToast(response.error || "Failed to load memory subdirectories", "error");
         this.memorySubdirs = ["default"];
         this.selectedMemorySubdir = "default";
       }
     } catch (error) {
-      this.error = error.message || "Failed to load memory subdirectories";
+      justToast(error.message || "Failed to load memory subdirectories", "error");
       this.memorySubdirs = ["default"];
       if (!this.memorySubdirs.includes(this.selectedMemorySubdir)) {
         this.selectedMemorySubdir = "default";
@@ -142,7 +140,6 @@ const memoryDashboardStore = {
 
     if (!silent) {
       this.loading = true;
-      this.error = null;
       this.message = null;
 
       if (!this.memoryInitialized[this.selectedMemorySubdir]) {
@@ -191,7 +188,7 @@ const memoryDashboardStore = {
         this.memoryInitialized[this.selectedMemorySubdir] = true;
       } else {
         if (!silent) {
-          this.error = response.error || "Failed to search memories";
+          justToast(response.error || "Failed to search memories", "error");
           this.memories = [];
           this.message = null;
         } else {
@@ -200,7 +197,7 @@ const memoryDashboardStore = {
       }
     } catch (error) {
       if (!silent) {
-        this.error = error.message || "Failed to search memories";
+        justToast(error.message || "Failed to search memories", "error");
         this.memories = [];
         this.message = null;
         console.error("Memory search error:", error);
