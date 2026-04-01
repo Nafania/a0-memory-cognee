@@ -12,12 +12,37 @@ Replaces the builtin FAISS-based `_memory` plugin with a [Cognee](https://github
 
 ## Installation
 
-1. Copy (or symlink) this directory into your Agent Zero `plugins/` folder as `_memory_cognee`.
-2. Enable the plugin in **Settings → Plugins**.
-3. The `hooks.py` install hook will:
-   - `pip install cognee[fastembed]`
-   - Disable the builtin `_memory` plugin
-   - Migrate any existing FAISS data
+### Via UI (recommended)
+
+1. Open **Settings → Plugins → Install**.
+2. Switch to the **Git URL** tab.
+3. Enter the repository URL for this plugin.
+4. Click **Install**. The plugin installer will clone the repo into `usr/plugins/`, run `hooks.py`, and enable the plugin automatically.
+
+### Via API
+
+```bash
+curl -X POST "$BASE/api/plugins/_plugin_installer/plugin_install" \
+  -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $TOKEN" \
+  -H "Origin: $ORIGIN" \
+  -d '{"action": "install_git", "git_url": "https://github.com/<user>/a0-memory-cognee"}'
+```
+
+### Manual (last resort)
+
+```bash
+git clone https://github.com/<user>/a0-memory-cognee /a0/usr/plugins/_memory_cognee
+```
+
+Then restart Agent Zero or toggle the plugin off/on in **Settings → Plugins**.
+
+### What happens on install
+
+The `hooks.py` install hook will:
+- `pip install cognee[fastembed]`
+- Disable the builtin `_memory` plugin
+- Migrate any existing FAISS data
 
 ## Configuration
 

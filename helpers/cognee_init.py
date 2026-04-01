@@ -112,8 +112,10 @@ def configure_cognee() -> None:
     try:
         import cognee
         from cognee import SearchType
-    except ImportError:
-        PrintStyle.error("Cognee is not installed — memory features will not work")
+    except Exception as e:
+        import traceback
+        PrintStyle.error(f"Cognee import failed — memory features will not work: {e}")
+        PrintStyle.error(traceback.format_exc())
         return
 
     _cognee_module = cognee
@@ -193,8 +195,16 @@ def configure_cognee() -> None:
 
 
 async def _create_db_tables():
-    from cognee.infrastructure.databases.relational import create_db_and_tables
-    await create_db_and_tables()
+    try:
+        from cognee.run_migrations import run_migrations
+        await run_migrations()
+    except Exception:
+        try:
+            from cognee.infrastructure.databases.relational import create_db_and_tables
+            await create_db_and_tables()
+        except Exception as e:
+            PrintStyle.error(f"Cognee DB table creation failed: {e}")
+            return
     PrintStyle.standard("Cognee DB tables initialized")
 
 

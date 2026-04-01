@@ -82,9 +82,9 @@ class CogneeBackgroundWorker:
 
         try:
             import cognee
-        except ImportError as e:
-            self._last_error = f"Cognee not installed: {e}"
-            PrintStyle.error("Cognee background: cognee module not found", e)
+        except Exception as e:
+            self._last_error = f"Cognee import failed: {e}"
+            PrintStyle.error(f"Cognee background: cognee import failed: {e}")
             return
 
         async with self._lock:
