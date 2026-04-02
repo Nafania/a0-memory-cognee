@@ -250,25 +250,21 @@ async def migrate_index(
     migrated_this_run = 0
 
     for area, docs in by_area.items():
-        dataset_name = f"{dataset_base}_{area}"
         node_sets = [area]
         if index_info["type"] == "project":
             node_sets.append(f"project_{index_info['project_name']}")
 
-        _log(f"  Area '{area}': {len(docs)} docs -> dataset '{dataset_name}'")
+        _log(f"  Area '{area}': {len(docs)} docs -> dataset '{dataset_base}'")
 
         if dry_run:
             migrated_this_run += len(docs)
             continue
 
         for doc_id, doc in docs:
-            meta_header = json.dumps(doc.metadata, default=str)
-            enriched_text = f"[META:{meta_header}]\n{doc.page_content}"
-
             try:
                 await cognee.add(
-                    enriched_text,
-                    dataset_name=dataset_name,
+                    doc.page_content,
+                    dataset_name=dataset_base,
                     node_set=node_sets,
                 )
                 already_migrated.add(doc_id)
@@ -321,9 +317,7 @@ async def run_cognify(indices: list[dict]):
 
     datasets = set()
     for index_info in indices:
-        dataset_base = subdir_to_dataset(index_info["memory_subdir"])
-        for area in ["main", "fragments", "solutions"]:
-            datasets.add(f"{dataset_base}_{area}")
+        datasets.add(subdir_to_dataset(index_info["memory_subdir"]))
 
     try:
         existing = await cognee.datasets.list_datasets()
@@ -353,20 +347,18 @@ async def verify_migration(indices: list[dict]):
 
     _log("\n=== VERIFICATION ===")
     for index_info in indices:
-        dataset_base = subdir_to_dataset(index_info["memory_subdir"])
-        for area in ["main", "fragments", "solutions"]:
-            dataset = f"{dataset_base}_{area}"
-            try:
-                results = await cognee.search(
-                    query_text="test query",
-                    query_type=SearchType.CHUNKS,
-                    top_k=3,
-                    datasets=[dataset],
-                )
-                count = len(results) if results else 0
-                _log(f"  {dataset}: {count} results from test search")
-            except Exception as e:
-                _log(f"  {dataset}: search error - {e}")
+        dataset = subdir_to_dataset(index_info["memory_subdir"])
+        try:
+            results = await cognee.search(
+                query_text="test query",
+                query_type=SearchType.CHUNKS,
+                top_k=3,
+                datasets=[dataset],
+            )
+            count = len(results) if results else 0
+            _log(f"  {dataset}: {count} results from test search")
+        except Exception as e:
+            _log(f"  {dataset}: search error - {e}")
 
 
 def backup_completed_indices(indices: list[dict], state: dict):
@@ -501,28 +493,48 @@ async def run_migration(dry_run: bool = False, verify: bool = False, force: bool
 
 
 async def cleanup_backup_datasets(base_dir: str):
-    """Remove duplicate datasets created from *_faiss_backup dirs in earlier buggy runs."""
+    """Remove duplicate/wrongly-named datasets from earlier buggy runs.
+
+    Cleans up:
+    - *_faiss_backup_* datasets (from backup dir migration)
+    - *_main, *_fragments, *_solutions datasets (old per-area naming bug)
+    """
     state = load_state(base_dir)
-    if state.get("cleanup_done"):
+    if state.get("cleanup_v2_done"):
         return
+
+    _AREA_SUFFIXES = ("_main", "_fragments", "_solutions")
 
     try:
         configure_cognee()
         import cognee
         all_datasets = await cognee.datasets.list_datasets()
-        backup_datasets = [ds for ds in all_datasets if "_faiss_backup_" in ds.name]
-        if not backup_datasets:
-            state["cleanup_done"] = True
+        to_delete = [
+            ds for ds in all_datasets
+            if "_faiss_backup_" in ds.name
+            or any(ds.name.endswith(s) for s in _AREA_SUFFIXES)
+        ]
+        if not to_delete:
+            state["cleanup_v2_done"] = True
             save_state(base_dir, state)
             return
-        _log(f"\nCleaning up {len(backup_datasets)} duplicate backup datasets...")
-        for ds in backup_datasets:
+        _log(f"\nCleaning up {len(to_delete)} wrongly-named datasets...")
+        for ds in to_delete:
             try:
                 await cognee.datasets.delete_dataset(ds.id)
                 _log(f"  Deleted: {ds.name}")
             except Exception as e:
                 _log(f"  Failed to delete {ds.name}: {e}")
-        state["cleanup_done"] = True
+
+        # Force re-migration so data goes to correctly-named datasets
+        for key in list(state.get("indices", {}).keys()):
+            idx_state = state["indices"][key]
+            if idx_state.get("status") == "complete":
+                idx_state["status"] = "pending"
+                idx_state["migrated_doc_ids"] = []
+                _log(f"  Reset migration state for: {key}")
+        state["completed"] = False
+        state["cleanup_v2_done"] = True
         save_state(base_dir, state)
     except Exception as e:
         _log(f"  Cleanup error (non-fatal): {e}")

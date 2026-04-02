@@ -59,16 +59,12 @@ class VectorDB:
                 raw = result.search_result
 
             content = str(raw) if not isinstance(raw, str) else raw
-            if content.startswith("[DOCMETA:"):
-                try:
-                    meta_end = content.index("]\n")
-                    import json
-                    metadata = json.loads(content[9:meta_end])
-                    content = content[meta_end + 2:]
-                except (ValueError, Exception):
-                    metadata = {}
-            else:
-                metadata = {}
+            metadata = {}
+
+            for doc_id, cached_doc in self._docs.items():
+                if cached_doc.page_content and cached_doc.page_content in content:
+                    metadata = dict(cached_doc.metadata)
+                    break
 
             if comparator and not comparator(metadata):
                 continue
@@ -94,18 +90,14 @@ class VectorDB:
         cognee, _ = _get_cognee()
 
         ids = [guids.generate_id() for _ in range(len(docs))]
-        import json
 
         for doc, doc_id in zip(docs, ids):
             doc.metadata["id"] = doc_id
             self._docs[doc_id] = doc
 
-            meta_header = json.dumps(doc.metadata, default=str)
-            enriched = f"[DOCMETA:{meta_header}]\n{doc.page_content}"
-
             try:
                 await cognee.add(
-                    enriched,
+                    doc.page_content,
                     dataset_name=self._dataset_name,
                 )
             except Exception:

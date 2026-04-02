@@ -1,6 +1,5 @@
 from datetime import datetime
 from typing import Any, List, Optional
-from helpers import guids
 
 import os
 import json
@@ -25,8 +24,8 @@ def _get_cognee():
     return get_cognee()
 
 
-def stable_memory_id_fallback(content: str, dataset_name: str = "") -> str:
-    """Deterministic id when Cognee/chunk metadata has no id (feedback correlation)."""
+def content_hash_id(content: str, dataset_name: str = "") -> str:
+    """Deterministic ID derived from content text. Used for matching data items and feedback."""
     h = hashlib.sha256()
     h.update(str(dataset_name).encode("utf-8", errors="replace"))
     h.update(b"\0")
@@ -155,14 +154,16 @@ class Memory:
 
         index = self._preload_knowledge_folders(log_item, kn_dirs, index)
 
+        all_ids_to_delete: set[str] = set()
+        for entry in index.values():
+            if entry["state"] in ["changed", "removed"] and entry.get("ids", []):
+                all_ids_to_delete.update(entry["ids"])
+
+        if all_ids_to_delete:
+            await _batch_delete_by_ids(self.dataset_name, all_ids_to_delete)
+
         for file_key in index:
             entry = index[file_key]
-            if entry["state"] in ["changed", "removed"] and entry.get("ids", []):
-                for data_id in entry["ids"]:
-                    try:
-                        await _delete_data_by_id(self.dataset_name, data_id)
-                    except Exception:
-                        pass
             if entry["state"] == "changed" and entry.get("documents"):
                 new_ids = []
                 area = entry.get("metadata", {}).get("area", "main")
@@ -174,7 +175,7 @@ class Memory:
                             dataset_name=self.dataset_name,
                             node_set=[area],
                         )
-                        new_ids.append(guids.generate_id(10))
+                        new_ids.append(content_hash_id(content, self.dataset_name))
                     except Exception as e:
                         PrintStyle.error(f"Failed to import knowledge: {e}")
                 entry["ids"] = new_ids
@@ -252,12 +253,7 @@ class Memory:
             include_default=False,
         )
         if docs:
-            ids = [doc.metadata.get("id", "") for doc in docs if doc.metadata.get("id")]
-            for doc_id in ids:
-                try:
-                    await _delete_data_by_id(self.dataset_name, doc_id)
-                except Exception:
-                    pass
+            await _delete_matching_data_items(self.dataset_name, docs)
             _invalidate_dashboard_cache()
         return docs
 
@@ -270,24 +266,30 @@ class Memory:
         id_set = set(ids)
 
         try:
-            datasets_list = await cognee.datasets.list_datasets()
-            target = None
-            for ds in datasets_list:
-                if ds.name == self.dataset_name:
-                    target = ds
-                    break
-            if target:
+            target = await _find_dataset(self.dataset_name)
+            if not target:
+                return []
+
+            for data_id in list(id_set):
+                if await _try_delete_direct(cognee, target, data_id):
+                    removed.append(Document(page_content="", metadata={"id": data_id}))
+                    id_set.discard(data_id)
+
+            if id_set:
                 data_items = await cognee.datasets.list_data(target.id)
                 for item in data_items:
+                    if not id_set:
+                        break
                     content = await read_data_item_content_async(item)
-                    for doc_id in list(id_set):
-                        if doc_id in content:
+                    item_hash = content_hash_id(content, self.dataset_name)
+                    for data_id in list(id_set):
+                        if item_hash == data_id:
                             await cognee.datasets.delete_data(
                                 dataset_id=target.id,
                                 data_id=item.id,
                             )
-                            removed.append(Document(page_content="", metadata={"id": doc_id}))
-                            id_set.discard(doc_id)
+                            removed.append(Document(page_content="", metadata={"id": data_id}))
+                            id_set.discard(data_id)
                             break
         except Exception as e:
             PrintStyle.error(f"Failed to delete from {self.dataset_name}: {e}")
@@ -304,38 +306,32 @@ class Memory:
     async def insert_documents(self, docs: list[Document]) -> list[str]:
         cognee, _ = _get_cognee()
         ids = []
-        timestamp = self.get_timestamp()
         from .cognee_background import CogneeBackgroundWorker
 
         for doc in docs:
-            doc_id = guids.generate_id(10)
-            doc.metadata["id"] = doc_id
-            doc.metadata["timestamp"] = timestamp
             area = doc.metadata.get("area", Memory.Area.MAIN.value)
             if not area:
                 area = Memory.Area.MAIN.value
-                doc.metadata["area"] = area
-
-            meta_header = json.dumps(doc.metadata, default=str)
-            enriched_text = f"[META:{meta_header}]\n{doc.page_content}"
 
             try:
                 await cognee.add(
-                    enriched_text,
+                    doc.page_content,
                     dataset_name=self.dataset_name,
                     node_set=[area],
                 )
-                ids.append(doc_id)
+                content_id = content_hash_id(doc.page_content, self.dataset_name)
+                ids.append(content_id)
                 CogneeBackgroundWorker.get_instance().mark_dirty(self.dataset_name)
             except Exception as e:
-                PrintStyle.error(f"Cognee insert failed for {doc_id}: {e}")
+                PrintStyle.error(f"Cognee insert failed: {e}")
 
         _invalidate_dashboard_cache()
         return ids
 
     async def update_documents(self, docs: list[Document]) -> list:
-        ids = [doc.metadata["id"] for doc in docs]
-        await self.delete_documents_by_ids(ids)
+        ids = [doc.metadata.get("id", "") for doc in docs if doc.metadata.get("id")]
+        if ids:
+            await self.delete_documents_by_ids(ids)
         result = await self.insert_documents(docs)
         return result
 
@@ -396,7 +392,7 @@ def recall_text_and_feedback_items(
         if not content:
             continue
         ds = str(doc.metadata.get("dataset") or fallback_dataset or "default")
-        mid = str(doc.metadata.get("id") or stable_memory_id_fallback(content, ds))
+        mid = str(doc.metadata.get("id") or content_hash_id(content, ds))
         texts.append(content)
         items.append(
             {
@@ -425,20 +421,18 @@ def _results_to_documents(results: Any, limit: int) -> list[Document]:
         metadata: dict[str, Any] = {}
 
         if isinstance(item, str):
-            content, metadata = _extract_metadata_from_text(item)
+            content = item
         elif isinstance(item, dict):
             content = item.get("text", item.get("content", ""))
-            if content:
-                content, metadata = _extract_metadata_from_text(content)
-            if item.get("id") and not metadata.get("id"):
+            if item.get("id"):
                 metadata["id"] = str(item["id"])
         elif hasattr(item, "text"):
-            content, metadata = _extract_metadata_from_text(str(item.text))
+            content = str(item.text)
         elif hasattr(item, "page_content"):
             content = item.page_content
             metadata = getattr(item, "metadata", {})
         else:
-            content, metadata = _extract_metadata_from_text(str(item))
+            content = str(item)
 
         if dataset_name:
             metadata.setdefault("dataset", dataset_name)
@@ -448,11 +442,7 @@ def _results_to_documents(results: Any, limit: int) -> list[Document]:
 
         if not metadata.get("id"):
             ds = str(metadata.get("dataset") or "")
-            metadata["id"] = stable_memory_id_fallback(content, ds)
-        if not metadata.get("area"):
-            metadata["area"] = Memory.Area.MAIN.value
-        if not metadata.get("timestamp"):
-            metadata["timestamp"] = Memory.get_timestamp()
+            metadata["id"] = content_hash_id(content, ds)
 
         docs.append(Document(page_content=content, metadata=metadata))
 
@@ -505,7 +495,11 @@ def _flatten_search_results(results: Any) -> list[tuple[Any, str]]:
 def _extract_nodes_to_flat(
     objects: list, dataset_name: str, flat: list[tuple[Any, str]]
 ) -> None:
-    """Extract unique node texts from a list of Cognee Edge objects."""
+    """Extract unique node texts from a list of Cognee Edge objects.
+
+    Passes Cognee native node IDs through as dicts so _results_to_documents
+    can use them instead of generating synthetic IDs.
+    """
     seen_ids: set = set()
     for obj in objects:
         nodes = []
@@ -526,7 +520,10 @@ def _extract_nodes_to_flat(
             if not text:
                 text = attrs.get("description", attrs.get("name", ""))
             if text and text.strip():
-                flat.append((text.strip(), dataset_name))
+                entry: dict[str, Any] = {"text": text.strip()}
+                if node_id:
+                    entry["id"] = str(node_id)
+                flat.append((entry, dataset_name))
 
 
 def _extract_dataset_name(result: Any) -> str:
@@ -553,19 +550,6 @@ def _deduplicate_documents(docs: list[Document]) -> list[Document]:
     return unique
 
 
-def _extract_metadata_from_text(text: str) -> tuple[str, dict]:
-    if text.startswith("[META:"):
-        try:
-            meta_end = text.index("]\n")
-            meta_json = text[6:meta_end]
-            metadata = json.loads(meta_json)
-            content = text[meta_end + 2:]
-            return content, metadata
-        except (ValueError, json.JSONDecodeError):
-            pass
-    return text, {"area": Memory.Area.MAIN.value}
-
-
 def read_data_item_content(item) -> str:
     """Read the text content of a Cognee data item, checking the file at raw_data_location."""
     raw_location = getattr(item, "raw_data_location", None)
@@ -590,21 +574,81 @@ async def read_data_item_content_async(item) -> str:
     return await asyncio.to_thread(read_data_item_content, item)
 
 
-async def _delete_data_by_id(dataset_name: str, data_id: str):
+async def _find_dataset(dataset_name: str):
+    """Find a Cognee dataset object by name."""
     cognee, _ = _get_cognee()
     try:
         datasets = await cognee.datasets.list_datasets()
-        target = None
         for ds in datasets:
             if ds.name == dataset_name:
-                target = ds
-                break
+                return ds
+    except Exception:
+        pass
+    return None
+
+
+async def _try_delete_direct(cognee, dataset, data_id: str) -> bool:
+    """Try deleting a data item using data_id as a Cognee native UUID."""
+    try:
+        import uuid
+        uuid.UUID(data_id)
+        await cognee.datasets.delete_data(dataset_id=dataset.id, data_id=data_id)
+        return True
+    except (ValueError, TypeError):
+        return False
+    except Exception:
+        return False
+
+
+async def _delete_matching_data_items(dataset_name: str, docs: list[Document]) -> int:
+    """Delete Cognee data items whose content matches any of the given documents."""
+    cognee, _ = _get_cognee()
+    deleted = 0
+    try:
+        target = await _find_dataset(dataset_name)
         if not target:
-            return False
+            return 0
+
+        match_hashes = set()
+        for doc in docs:
+            content = (doc.page_content or "").strip()
+            if content:
+                match_hashes.add(content_hash_id(content, dataset_name))
+
+        if not match_hashes:
+            return 0
+
         data_items = await cognee.datasets.list_data(target.id)
         for item in data_items:
             content = await read_data_item_content_async(item)
-            if data_id in content:
+            item_hash = content_hash_id(content, dataset_name)
+            if item_hash in match_hashes:
+                try:
+                    await cognee.datasets.delete_data(dataset_id=target.id, data_id=item.id)
+                    deleted += 1
+                except Exception:
+                    pass
+    except Exception as e:
+        PrintStyle.error(f"Failed to delete matching data from {dataset_name}: {e}")
+    return deleted
+
+
+async def _delete_data_by_id(dataset_name: str, data_id: str):
+    """Delete a data item by ID. Tries Cognee native UUID first, falls back to content hash."""
+    cognee, _ = _get_cognee()
+    try:
+        target = await _find_dataset(dataset_name)
+        if not target:
+            return False
+
+        if await _try_delete_direct(cognee, target, data_id):
+            return True
+
+        data_items = await cognee.datasets.list_data(target.id)
+        for item in data_items:
+            content = await read_data_item_content_async(item)
+            item_hash = content_hash_id(content, dataset_name)
+            if item_hash == data_id:
                 await cognee.datasets.delete_data(
                     dataset_id=target.id,
                     data_id=item.id,
@@ -613,6 +657,44 @@ async def _delete_data_by_id(dataset_name: str, data_id: str):
     except Exception as e:
         PrintStyle.error(f"Failed to delete data {data_id} from {dataset_name}: {e}")
     return False
+
+
+async def _batch_delete_by_ids(dataset_name: str, ids: set[str]) -> int:
+    """Delete multiple data items in one pass. Single dataset lookup + single list_data call."""
+    if not ids:
+        return 0
+    cognee, _ = _get_cognee()
+    deleted = 0
+    remaining = set(ids)
+    try:
+        target = await _find_dataset(dataset_name)
+        if not target:
+            return 0
+
+        for data_id in list(remaining):
+            if await _try_delete_direct(cognee, target, data_id):
+                deleted += 1
+                remaining.discard(data_id)
+
+        if remaining:
+            data_items = await cognee.datasets.list_data(target.id)
+            for item in data_items:
+                if not remaining:
+                    break
+                content = await read_data_item_content_async(item)
+                item_hash = content_hash_id(content, dataset_name)
+                if item_hash in remaining:
+                    try:
+                        await cognee.datasets.delete_data(
+                            dataset_id=target.id, data_id=item.id,
+                        )
+                        deleted += 1
+                        remaining.discard(item_hash)
+                    except Exception:
+                        pass
+    except Exception as e:
+        PrintStyle.error(f"Batch delete failed for {dataset_name}: {e}")
+    return deleted
 
 
 def _invalidate_dashboard_cache():
@@ -715,25 +797,22 @@ def get_knowledge_subdirs_by_memory_subdir(
 async def insert_with_simple_dedup(
     db: "Memory", text: str, area: str, threshold: float
 ) -> str | None:
-    """Skip insert if a near-identical memory already exists above *threshold*.
+    """Replace near-identical memories above *threshold* with the new version.
 
-    Provides a lightweight semantic dedup when full LLM consolidation is disabled.
-    Cognee already handles exact content-hash dedup at the ``add()`` level;
-    this catches semantically near-identical fragments that differ in wording.
+    Matches core Agent Zero behavior: delete similar old entries, then insert
+    the new one. This ensures memories evolve over time instead of being frozen.
     """
     try:
-        existing = await db.search_similarity_threshold(
-            query=text,
-            limit=1,
-            threshold=threshold,
-            filter=f"area == '{area}'",
-            include_default=False,
-        )
-        if existing:
-            PrintStyle(font_color="gray").print(
-                f"Skipping duplicate memory (area={area}): {text[:80]}..."
+        if threshold > 0:
+            removed = await db.delete_documents_by_query(
+                query=text,
+                threshold=threshold,
+                filter=f"area == '{area}'",
             )
-            return None
+            if removed:
+                PrintStyle(font_color="gray").print(
+                    f"Replacing {len(removed)} similar memories (area={area}): {text[:80]}..."
+                )
     except Exception:
         pass
     return await db.insert_text(text=text, metadata={"area": area})

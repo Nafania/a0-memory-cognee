@@ -188,8 +188,7 @@ class MemoryDashboard(ApiHandler):
             memories = []
             try:
                 import cognee
-                from usr.plugins.memory_cognee.helpers.memory import _extract_metadata_from_text
-                from helpers import guids
+                from usr.plugins.memory_cognee.helpers.memory import content_hash_id
 
                 all_datasets = await cognee.datasets.list_datasets()
                 target_names = {memory.dataset_name}
@@ -202,12 +201,16 @@ class MemoryDashboard(ApiHandler):
                         PrintStyle.error(f"[MemoryDashboard] Failed to list data for '{ds.name}': {e}")
                         continue
                     for item in data_items:
-                        content = self.read_data_item_content(item)
-                        text, meta = _extract_metadata_from_text(content)
-                        if not meta.get("id"):
-                            meta["id"] = guids.generate_id(10)
-                        if not meta.get("area"):
+                        text = self.read_data_item_content(item)
+                        meta = {}
+                        meta["id"] = str(getattr(item, "id", "")) or content_hash_id(text, ds.name)
+                        node_sets = getattr(item, "node_set", None) or []
+                        if node_sets:
+                            meta["area"] = node_sets[0] if isinstance(node_sets, list) else str(node_sets)
+                        else:
                             meta["area"] = Memory.Area.MAIN.value
+                        created = getattr(item, "created_at", None)
+                        meta["timestamp"] = str(created) if created else ""
                         if area_filter and meta.get("area", "").lower() != area_filter.lower():
                             continue
                         memories.append(Document(page_content=text, metadata=meta))
