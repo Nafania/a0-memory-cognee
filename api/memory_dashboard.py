@@ -204,15 +204,13 @@ class MemoryDashboard(ApiHandler):
                         text = self.read_data_item_content(item)
                         meta = {}
                         meta["id"] = str(getattr(item, "id", "")) or content_hash_id(text, ds.name)
-                        raw_ns = getattr(item, "node_set", None)
-                        area_val = ""
-                        if raw_ns:
-                            try:
-                                first = next(iter(raw_ns))
-                                area_val = getattr(first, "name", None) or getattr(first, "value", None) or str(first)
-                            except (TypeError, StopIteration):
-                                area_val = str(raw_ns)
-                        meta["area"] = area_val.lower().strip() if area_val else Memory.Area.MAIN.value
+                        node_set = getattr(item, "node_set", None) or []
+                        if node_set and isinstance(node_set, list):
+                            meta["area"] = str(node_set[0]).lower()
+                        elif node_set:
+                            meta["area"] = str(node_set).lower()
+                        else:
+                            meta["area"] = Memory.Area.MAIN.value
                         created = getattr(item, "created_at", None)
                         meta["timestamp"] = str(created) if created else ""
                         if area_filter and meta.get("area", "").lower() != area_filter.lower():
