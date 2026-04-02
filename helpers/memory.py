@@ -24,6 +24,25 @@ def _get_cognee():
     return get_cognee()
 
 
+def parse_node_set_area(raw_node_set) -> str:
+    """Extract area string from Cognee Data.node_set field.
+
+    Cognee double-serializes: json.dumps() into a Column(JSON), so the value
+    comes back as a JSON string like '["main"]' rather than a list.
+    """
+    if not raw_node_set:
+        return "main"
+    ns = raw_node_set
+    if isinstance(ns, str):
+        try:
+            ns = json.loads(ns)
+        except (json.JSONDecodeError, ValueError):
+            return ns.strip().lower()
+    if isinstance(ns, list) and ns:
+        return str(ns[0]).strip().lower()
+    return str(ns).strip().lower()
+
+
 def content_hash_id(content: str, dataset_name: str = "") -> str:
     """Deterministic ID derived from content text. Used for matching data items and feedback."""
     h = hashlib.sha256()

@@ -1,7 +1,7 @@
 import time as _time
 
 from helpers.api import ApiHandler, Request, Response
-from usr.plugins.memory_cognee.helpers.memory import Memory, get_existing_memory_subdirs, get_context_memory_subdir, read_data_item_content
+from usr.plugins.memory_cognee.helpers.memory import Memory, get_existing_memory_subdirs, get_context_memory_subdir, read_data_item_content, parse_node_set_area
 from helpers import files
 from helpers.print_style import PrintStyle
 from langchain_core.documents import Document
@@ -204,13 +204,7 @@ class MemoryDashboard(ApiHandler):
                         text = self.read_data_item_content(item)
                         meta = {}
                         meta["id"] = str(getattr(item, "id", "")) or content_hash_id(text, ds.name)
-                        node_set = getattr(item, "node_set", None) or []
-                        if node_set and isinstance(node_set, list):
-                            meta["area"] = str(node_set[0]).lower()
-                        elif node_set:
-                            meta["area"] = str(node_set).lower()
-                        else:
-                            meta["area"] = Memory.Area.MAIN.value
+                        meta["area"] = parse_node_set_area(getattr(item, "node_set", None))
                         created = getattr(item, "created_at", None)
                         meta["timestamp"] = str(created) if created else ""
                         if area_filter and meta.get("area", "").lower() != area_filter.lower():
