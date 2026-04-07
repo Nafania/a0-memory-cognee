@@ -197,10 +197,13 @@ def configure_cognee() -> None:
 async def _create_db_tables():
     try:
         from cognee.run_migrations import run_migrations
+
         await run_migrations()
-    except Exception:
+    except Exception as mig_err:
+        PrintStyle.error(f"Cognee run_migrations failed, trying create_db_and_tables: {mig_err}")
         try:
             from cognee.infrastructure.databases.relational import create_db_and_tables
+
             await create_db_and_tables()
         except Exception as e:
             PrintStyle.error(f"Cognee DB table creation failed: {e}")
@@ -213,6 +216,27 @@ async def init_cognee() -> None:
     configure_cognee()
     await _create_db_tables()
     PrintStyle.standard("Cognee fully initialized")
+
+
+def run_memory_cognee_init_a0_extension() -> None:
+    """Entry for Agent Zero `init_a0` / `end` extensions.
+
+    Upstream `run_ui.run()` calls `init_a0()` before starting the server; extension
+    folders are `_functions/<run_ui.init_a0.__module__>/init_a0/end/` per
+    `helpers.extension.extensible` (see agent0ai/agent-zero). Official Docker starts
+    `python run_ui.py`, so `__module__` is usually `__main__`; if `run_ui` is imported
+    as a module, use the duplicate extension under `_functions/run_ui/...`.
+    """
+    import asyncio
+
+    try:
+        configure_cognee()
+        asyncio.run(init_cognee())
+        from .cognee_background import CogneeBackgroundWorker
+
+        CogneeBackgroundWorker.get_instance().start()
+    except Exception as e:
+        PrintStyle.error(f"Cognee eager init failed (will retry lazily): {e}")
 
 
 def get_cognee():
