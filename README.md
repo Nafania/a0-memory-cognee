@@ -40,7 +40,7 @@ Then restart Agent Zero or toggle the plugin off/on in **Settings → Plugins**.
 ### What happens on install
 
 The `hooks.py` install hook will:
-- `pip install cognee[fastembed]`
+- `pip install` Cognee with a pinned compatible release (see `COGNEE_PIP_SPEC` in `hooks.py`, currently the `0.5.x` line)
 - Disable the builtin `_memory` plugin
 - Migrate any existing FAISS data
 
