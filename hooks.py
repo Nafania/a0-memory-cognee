@@ -36,7 +36,15 @@ def install():
         from helpers.print_style import PrintStyle
         PrintStyle.warning(f"Could not auto-disable _memory: {e}. Please disable manually in Settings > Plugins.")
 
-    # 3. Migrate FAISS data if present
+    # 3. Initialize Cognee DB (run migrations / create tables)
+    try:
+        from usr.plugins.memory_cognee.helpers.cognee_init import ensure_tables_sync
+        ensure_tables_sync()
+    except Exception as e:
+        from helpers.print_style import PrintStyle
+        PrintStyle.warning(f"Cognee DB init during install: {e}")
+
+    # 4. Migrate FAISS data if present
     try:
         from usr.plugins.memory_cognee.helpers.faiss_migration import migrate
         migrate()

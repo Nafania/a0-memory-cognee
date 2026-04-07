@@ -42,6 +42,7 @@ _EMBED_DIMENSIONS: dict[str, int] = {
 }
 
 _configured = False
+_init_done = False
 _cognee_module = None
 _search_type_class = None
 
@@ -96,6 +97,8 @@ def configure_cognee() -> None:
     os.makedirs(data_storage, exist_ok=True)
     os.makedirs(system_storage, exist_ok=True)
     os.makedirs(cache_storage, exist_ok=True)
+    # Cognee expects a `databases/` subdir inside system_storage for SQLite files
+    os.makedirs(os.path.join(system_storage, "databases"), exist_ok=True)
 
     os.environ["DATA_ROOT_DIRECTORY"] = data_storage
     os.environ["SYSTEM_ROOT_DIRECTORY"] = system_storage
@@ -199,8 +202,10 @@ async def _create_db_tables():
         from cognee.run_migrations import run_migrations
 
         await run_migrations()
-    except Exception as mig_err:
-        PrintStyle.error(f"Cognee run_migrations failed, trying create_db_and_tables: {mig_err}")
+    except BaseException as mig_err:
+        # Must catch BaseException: Cognee's run_migrations() calls sys.exit(1)
+        # on alembic failure, raising SystemExit which is BaseException, not Exception.
+        PrintStyle.error(f"Cognee run_migrations failed ({type(mig_err).__name__}), trying create_db_and_tables: {mig_err}")
         try:
             from cognee.infrastructure.databases.relational import create_db_and_tables
 
@@ -208,14 +213,105 @@ async def _create_db_tables():
         except Exception as e:
             PrintStyle.error(f"Cognee DB table creation failed: {e}")
             return
+
+    _sync_missing_columns()
     PrintStyle.standard("Cognee DB tables initialized")
 
 
+def _sync_missing_columns():
+    """Compare Cognee ORM models against actual DB schema and add missing columns.
+
+    TEMPORARY WORKAROUND for https://github.com/topoteretes/cognee/issues/TBD
+    Cognee 0.5.7 added importance_weight to the Data ORM model (PR #2447) but
+    shipped no alembic migration, so run_migrations() never adds the column to
+    existing databases.  This function generically detects columns present in
+    the ORM but absent from the DB and adds them via DDL.
+
+    TODO: remove once Cognee ships a proper alembic migration for importance_weight
+    (track upstream fix, then drop this function and its call site).
+    """
+    try:
+        from cognee.infrastructure.databases.relational.ModelBase import Base
+        from sqlalchemy import create_engine, inspect as sa_inspect, text
+
+        db_path = os.path.join(
+            os.environ.get("SYSTEM_ROOT_DIRECTORY", ""),
+            "databases",
+            os.environ.get("DB_NAME", "cognee_db"),
+        )
+        if not os.path.exists(db_path):
+            return
+        engine = create_engine(f"sqlite:///{db_path}")
+        inspector = sa_inspect(engine)
+
+        for table_name, table_obj in Base.metadata.tables.items():
+            if not inspector.has_table(table_name):
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table_name)}
+            for col in table_obj.columns:
+                if col.name in existing:
+                    continue
+                col_type = col.type.compile(dialect=engine.dialect)
+                parts = [f"ALTER TABLE [{table_name}] ADD COLUMN [{col.name}] {col_type}"]
+                if not col.nullable:
+                    parts.append("NOT NULL")
+                if col.server_default is not None:
+                    parts.append(f"DEFAULT {col.server_default.arg}")
+                elif col.nullable:
+                    parts.append("DEFAULT NULL")
+                ddl = " ".join(parts)
+                with engine.begin() as conn:
+                    conn.execute(text(ddl))
+                PrintStyle.standard(f"Schema sync: added {table_name}.{col.name} ({col_type})")
+    except Exception as e:
+        PrintStyle.error(f"Schema column sync failed: {e}")
+
+
 async def init_cognee() -> None:
-    """One-time startup initialization. Call after settings are loaded."""
+    """One-time startup initialization. Idempotent — safe to call multiple times."""
+    global _init_done
+    if _init_done:
+        return
     configure_cognee()
     await _create_db_tables()
+    _init_done = True
     PrintStyle.standard("Cognee fully initialized")
+
+
+def ensure_tables_sync() -> None:
+    """Run init_cognee() from a sync context (e.g. hooks.install).
+
+    Works whether or not an event loop is already running:
+    - No loop → asyncio.run()
+    - Loop running (web server) → new thread with its own loop
+    """
+    if _init_done:
+        return
+    import asyncio
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop — safe to use asyncio.run()
+        try:
+            asyncio.run(init_cognee())
+        except BaseException as e:
+            PrintStyle.error(f"ensure_tables_sync (asyncio.run): {type(e).__name__}: {e}")
+        return
+
+    import threading
+
+    def _run():
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(init_cognee())
+        except BaseException as e:
+            PrintStyle.error(f"ensure_tables_sync (thread): {type(e).__name__}: {e}")
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=60)
 
 
 def run_memory_cognee_init_a0_extension() -> None:
@@ -235,14 +331,17 @@ def run_memory_cognee_init_a0_extension() -> None:
         from .cognee_background import CogneeBackgroundWorker
 
         CogneeBackgroundWorker.get_instance().start()
-    except Exception as e:
-        PrintStyle.error(f"Cognee eager init failed (will retry lazily): {e}")
+    except BaseException as e:
+        # BaseException: asyncio.run() re-raises SystemExit from run_migrations
+        PrintStyle.error(f"Cognee eager init failed ({type(e).__name__}): {e}")
 
 
 def get_cognee():
     """Get initialized cognee module. Lazy-initializes on first call if needed."""
     if _cognee_module is None:
         configure_cognee()
+    if not _init_done:
+        ensure_tables_sync()
     if _cognee_module is None:
         raise RuntimeError("Cognee could not be initialized — check logs for details")
     return _cognee_module, _search_type_class
