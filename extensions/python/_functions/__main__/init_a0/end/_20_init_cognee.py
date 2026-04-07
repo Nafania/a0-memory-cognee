@@ -1,3 +1,5 @@
+import asyncio
+
 from helpers.extension import Extension
 
 
@@ -5,8 +7,9 @@ class InitCognee(Extension):
 
     def execute(self, **kwargs):
         try:
-            from usr.plugins.memory_cognee.helpers.cognee_init import configure_cognee
+            from usr.plugins.memory_cognee.helpers.cognee_init import configure_cognee, init_cognee
             configure_cognee()
+            asyncio.run(init_cognee())
 
             from usr.plugins.memory_cognee.helpers.cognee_background import CogneeBackgroundWorker
             CogneeBackgroundWorker.get_instance().start()
