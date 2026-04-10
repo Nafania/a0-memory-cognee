@@ -39,6 +39,8 @@ class MemoryDashboard(ApiHandler):
                 return await self._get_cognify_status()
             elif action == "knowledge_graph":
                 return await self._get_knowledge_graph()
+            elif action == "graph_data":
+                return await self._get_graph_data(input)
             else:
                 return {
                     "success": False,
@@ -311,3 +313,93 @@ class MemoryDashboard(ApiHandler):
         except Exception as e:
             PrintStyle.error(f"[MemoryDashboard] Knowledge graph visualization failed: {e}")
             return {"success": False, "error": str(e)}
+
+    async def _get_graph_data(self, input: dict) -> dict:
+        try:
+            from cognee.infrastructure.databases.graph import get_graph_engine
+
+            node_limit = int(input.get("node_limit", 300))
+
+            graph_engine = await get_graph_engine()
+            is_empty = await graph_engine.is_empty()
+            if is_empty:
+                return {
+                    "success": True,
+                    "nodes": [],
+                    "edges": [],
+                    "node_count": 0,
+                    "edge_count": 0,
+                    "total_node_count": 0,
+                    "total_edge_count": 0,
+                    "node_types": [],
+                    "empty": True,
+                    "truncated": False,
+                }
+
+            nodes_raw, edges_raw = await graph_engine.get_graph_data()
+            total_node_count = len(nodes_raw)
+            total_edge_count = len(edges_raw)
+
+            all_nodes = []
+            node_types: set[str] = set()
+            for node_id, props in nodes_raw:
+                node_type = str(props.get("type", "unknown"))
+                node_types.add(node_type)
+                label = (
+                    props.get("name", "")
+                    or props.get("label", "")
+                    or str(node_id)[:12]
+                )
+                clean_props: dict = {}
+                for k, v in props.items():
+                    if k == "id":
+                        continue
+                    if isinstance(v, (str, int, float, bool, type(None))):
+                        clean_props[k] = v
+                    else:
+                        try:
+                            clean_props[k] = str(v)
+                        except Exception:
+                            pass
+                all_nodes.append({
+                    "id": str(node_id),
+                    "label": str(label)[:120],
+                    "type": node_type,
+                    "properties": clean_props,
+                })
+
+            truncated = len(all_nodes) > node_limit
+            nodes = all_nodes[:node_limit]
+            included_ids = {n["id"] for n in nodes}
+
+            edges = []
+            for edge_tuple in edges_raw:
+                src, tgt, rel_name = edge_tuple[0], edge_tuple[1], edge_tuple[2]
+                s, t = str(src), str(tgt)
+                if s not in included_ids or t not in included_ids:
+                    continue
+                edge_props = edge_tuple[3] if len(edge_tuple) > 3 else {}
+                edges.append({
+                    "source": s,
+                    "target": t,
+                    "label": str(rel_name),
+                    "properties": edge_props if isinstance(edge_props, dict) else {},
+                })
+
+            return {
+                "success": True,
+                "nodes": nodes,
+                "edges": edges,
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+                "total_node_count": total_node_count,
+                "total_edge_count": total_edge_count,
+                "node_types": sorted(node_types),
+                "empty": False,
+                "truncated": truncated,
+            }
+        except Exception as e:
+            import traceback
+            PrintStyle.error(f"[MemoryDashboard] Graph data retrieval failed: {e}")
+            traceback.print_exc()
+            return {"success": False, "error": str(e), "nodes": [], "edges": []}
