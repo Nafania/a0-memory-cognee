@@ -1,8 +1,9 @@
+import os
 import subprocess
 import sys
 
-# Pin the Cognee line we test against; bump intentionally (changelog, migrations, API).
-COGNEE_PIP_SPEC = "cognee[fastembed]~=0.5.7"
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+_REQUIREMENTS_TXT = os.path.join(_PLUGIN_DIR, "requirements.txt")
 
 
 def install():
@@ -19,8 +20,8 @@ def install():
             pinned_openai = f"openai=={ver}" if major < 2 else f"openai<{major + 1}"
             break
 
-    # Install cognee while keeping openai compatible with litellm
-    cmd = [sys.executable, "-m", "pip", "install", COGNEE_PIP_SPEC]
+    # Install from requirements.txt, keeping openai compatible with litellm
+    cmd = [sys.executable, "-m", "pip", "install", "-r", _REQUIREMENTS_TXT]
     if pinned_openai:
         cmd.append(pinned_openai)
     subprocess.check_call(cmd)

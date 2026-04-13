@@ -1,0 +1,3 @@
+# Bump intentionally (changelog, migrations, API).
+# Used by hooks.install() and by HA addon pip-restore on container restart.
+cognee[fastembed]~=0.5.7
