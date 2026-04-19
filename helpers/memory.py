@@ -248,10 +248,10 @@ class Memory:
         datasets = self.get_search_datasets() if include_default else [self.dataset_name]
 
         try:
-            results = await cognee.recall(
+            results = await cognee.search(
                 query_text=query,
-                datasets=datasets,
                 top_k=limit,
+                datasets=datasets,
                 node_type=NodeSet,
                 node_name=node_names if node_names else None,
                 session_id=session_id,
@@ -259,7 +259,7 @@ class Memory:
                 verbose=True,
             )
         except Exception as e:
-            PrintStyle.error(f"cognee.recall failed: {e}")
+            PrintStyle.error(f"cognee.search failed: {e}")
             return []
 
         return _results_to_documents(results or [], limit)

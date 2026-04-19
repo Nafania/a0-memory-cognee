@@ -75,20 +75,20 @@ class RecallMemories(Extension):
         try:
             session_id = getattr(self.agent.context, 'id', None)
             mem_answers, sol_answers = await asyncio.gather(
-                cognee.recall(
+                cognee.search(
                     query_text=query,
-                    datasets=datasets,
                     top_k=cfg["memory_recall_memories_max_search"],
+                    datasets=datasets,
                     node_type=NodeSet,
                     node_name=mem_node_name,
                     session_id=session_id,
                     only_context=True,
                     verbose=True,
                 ),
-                cognee.recall(
+                cognee.search(
                     query_text=query,
-                    datasets=datasets,
                     top_k=cfg["memory_recall_solutions_max_search"],
+                    datasets=datasets,
                     node_type=NodeSet,
                     node_name=sol_node_name,
                     session_id=session_id,
@@ -98,13 +98,13 @@ class RecallMemories(Extension):
             )
         except OSError as e:
             try:
-                PrintStyle.error(f"cognee.recall OS error (likely too many open files): {e}")
+                PrintStyle.error(f"cognee.search OS error (likely too many open files): {e}")
             except OSError:
                 pass
             mem_answers, sol_answers = [], []
         except Exception as e:
             try:
-                PrintStyle.error(f"cognee.recall failed: {e}")
+                PrintStyle.error(f"cognee.search failed: {e}")
             except OSError:
                 pass
             mem_answers, sol_answers = [], []
