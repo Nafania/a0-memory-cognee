@@ -199,13 +199,13 @@ def configure_cognee() -> None:
 
 async def _create_db_tables():
     try:
-        from cognee.run_migrations import run_migrations
+        from cognee.run_migrations import run_startup_migrations
 
-        await run_migrations()
+        await run_startup_migrations()
     except BaseException as mig_err:
         # Must catch BaseException: Cognee's run_migrations() calls sys.exit(1)
         # on alembic failure, raising SystemExit which is BaseException, not Exception.
-        PrintStyle.error(f"Cognee run_migrations failed ({type(mig_err).__name__}), trying create_db_and_tables: {mig_err}")
+        PrintStyle.error(f"Cognee run_startup_migrations failed ({type(mig_err).__name__}), trying create_db_and_tables: {mig_err}")
         try:
             from cognee.infrastructure.databases.relational import create_db_and_tables
 
@@ -223,7 +223,7 @@ def _sync_missing_columns():
 
     TEMPORARY WORKAROUND for https://github.com/topoteretes/cognee/issues/TBD
     Cognee 0.5.7 added importance_weight to the Data ORM model (PR #2447) but
-    shipped no alembic migration, so run_migrations() never adds the column to
+    shipped no alembic migration, so run_startup_migrations() never adds the column to
     existing databases.  This function generically detects columns present in
     the ORM but absent from the DB and adds them via DDL.
 

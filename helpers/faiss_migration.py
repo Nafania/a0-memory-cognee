@@ -521,7 +521,7 @@ async def cleanup_backup_datasets(base_dir: str):
         _log(f"\nCleaning up {len(to_delete)} wrongly-named datasets...")
         for ds in to_delete:
             try:
-                await cognee.datasets.delete_dataset(ds.id)
+                await cognee.forget(dataset=ds.id)
                 _log(f"  Deleted: {ds.name}")
             except Exception as e:
                 _log(f"  Failed to delete {ds.name}: {e}")

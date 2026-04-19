@@ -102,10 +102,10 @@ class CogneeBackgroundWorker:
                 if config["memify_enabled"]:
                     for dataset in datasets:
                         try:
-                            await cognee.memify(dataset=dataset)
-                            PrintStyle.standard(f"Cognee memify completed for dataset: {dataset}")
+                            await cognee.improve(dataset=dataset)
+                            PrintStyle.standard(f"Cognee improve completed for dataset: {dataset}")
                         except Exception as e:
-                            PrintStyle.error(f"Cognee memify failed for {dataset}: {e}")
+                            PrintStyle.error(f"Cognee improve failed for {dataset}: {e}")
                             self._last_error = str(e)
 
                 self._dirty_datasets.clear()
