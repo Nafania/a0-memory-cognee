@@ -47,12 +47,14 @@
                     x-show="$store.memoryDashboardStore.viewMode === 'table'">
                     <div class="filter-group-inline filter-area">
                         <label for="area-filter">Area</label>
-                        <select id="area-filter" x-model="$store.memoryDashboardStore.areaFilter">
+                        <select id="area-filter" x-model="$store.memoryDashboardStore.areaFilter"
+                            @change="$store.memoryDashboardStore.searchMemories()">
                             <option value="">All Areas</option>
-                            <option value="main">Main</option>
-                            <option value="fragments">Fragments</option>
-                            <option value="solutions">Solutions</option>
-                            <option value="skills">Skills</option>
+                            <template x-for="area in $store.memoryDashboardStore.sortedAreaKeys" :key="area">
+                                <option :value="area"
+                                    x-text="`${area.charAt(0).toUpperCase() + area.slice(1)} (${$store.memoryDashboardStore.availableAreas[area]})`">
+                                </option>
+                            </template>
                         </select>
                     </div>
 
@@ -62,7 +64,8 @@
                             min="10" max="1000" step="10" />
                     </div>
 
-                    <div class="filter-threshold">
+                    <!-- Threshold: not supported by Cognee search API (no score in results) -->
+                    <div class="filter-threshold" style="display: none;">
                         <label for="threshold-input">Threshold: <strong
                                 x-text="$store.memoryDashboardStore.threshold.toFixed(2)"></strong></label>
                         <input type="range" id="threshold-input" x-model.number="$store.memoryDashboardStore.threshold"

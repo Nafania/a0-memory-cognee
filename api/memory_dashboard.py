@@ -188,6 +188,7 @@ class MemoryDashboard(ApiHandler):
                     )
 
             memories = []
+            all_areas: dict[str, int] = {}
             try:
                 import cognee
                 from usr.plugins.memory_cognee.helpers.memory import content_hash_id
@@ -209,7 +210,9 @@ class MemoryDashboard(ApiHandler):
                         meta["area"] = parse_node_set_area(getattr(item, "node_set", None))
                         created = getattr(item, "created_at", None)
                         meta["timestamp"] = str(created) if created else ""
-                        if area_filter and meta.get("area", "").lower() != area_filter.lower():
+                        area_key = (meta.get("area") or "unknown").lower()
+                        all_areas[area_key] = all_areas.get(area_key, 0) + 1
+                        if area_filter and area_key != area_filter.lower():
                             continue
                         memories.append(Document(page_content=text, metadata=meta))
             except Exception as e:
@@ -228,6 +231,7 @@ class MemoryDashboard(ApiHandler):
             return self._paginate_cached(
                 formatted_all, offset, limit,
                 search_query, area_filter, memory_subdir,
+                all_areas=all_areas,
             )
 
         except Exception as e:
@@ -237,11 +241,12 @@ class MemoryDashboard(ApiHandler):
     def _paginate_cached(
         formatted_all: list, offset: int, limit: int,
         search_query: str, area_filter: str, memory_subdir: str,
+        all_areas: dict[str, int] | None = None,
     ) -> dict:
         total_db = len(formatted_all)
         page = formatted_all[offset:offset + limit] if limit else formatted_all[offset:]
         knowledge_count = sum(1 for m in page if m["knowledge_source"])
-        return {
+        result = {
             "success": True,
             "memories": page,
             "total_count": len(page),
@@ -252,6 +257,9 @@ class MemoryDashboard(ApiHandler):
             "area_filter": area_filter,
             "memory_subdir": memory_subdir,
         }
+        if all_areas is not None:
+            result["available_areas"] = all_areas
+        return result
 
     @staticmethod
     def read_data_item_content(item) -> str:

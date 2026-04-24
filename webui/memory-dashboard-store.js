@@ -41,6 +41,7 @@ const memoryDashboardStore = {
   totalDbCount: 0,
   knowledgeCount: 0,
   conversationCount: 0,
+  availableAreas: {},
   areasCount: {},
 
   // Memory detail modal (standard modal approach)
@@ -196,6 +197,9 @@ const memoryDashboardStore = {
         this.totalDbCount = response.total_db_count || 0;
         this.knowledgeCount = response.knowledge_count || 0;
         this.conversationCount = response.conversation_count || 0;
+        if (response.available_areas) {
+          this.availableAreas = response.available_areas;
+        }
 
         if (!silent) {
           this.message = response.message || null;
@@ -259,6 +263,10 @@ const memoryDashboardStore = {
   // Pagination
   get totalPages() {
     return Math.ceil(this.memories.length / this.itemsPerPage);
+  },
+
+  get sortedAreaKeys() {
+    return Object.keys(this.availableAreas).sort();
   },
 
   get paginatedMemories() {
