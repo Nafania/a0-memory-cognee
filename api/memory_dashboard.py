@@ -149,7 +149,6 @@ class MemoryDashboard(ApiHandler):
             search_query = input.get("search", "")
             limit = input.get("limit", 100)
             offset = input.get("offset", 0)
-            threshold = input.get("threshold", 0.6)
 
             memory = await Memory.get_by_subdir(memory_subdir, preload_knowledge=False)
 
@@ -157,7 +156,6 @@ class MemoryDashboard(ApiHandler):
                 docs = await memory.search_similarity_threshold(
                     query=search_query,
                     limit=limit,
-                    threshold=threshold,
                     filter=f"area == '{area_filter}'" if area_filter else "",
                     include_default=False,
                 )

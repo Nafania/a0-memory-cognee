@@ -1,7 +1,7 @@
 name: memory_cognee
 title: Memory (Cognee)
 description: Cognee-backed persistent memory with background processing, consolidation, and feedback. Replaces the builtin FAISS _memory plugin.
-version: 1.4.1
+version: 1.4.2
 settings_sections:
   - agent
 per_project_config: true
