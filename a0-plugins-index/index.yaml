@@ -1,0 +1,9 @@
+title: "Memory (Cognee)"
+description: "Knowledge-graph memory powered by Cognee. Background processing, consolidation, feedback, interactive graph visualization, and dashboard. Replaces builtin FAISS memory."
+github: https://github.com/Nafania/a0-memory-cognee
+tags:
+  - memory
+  - knowledge-graph
+  - cognee
+  - dashboard
+  - search
