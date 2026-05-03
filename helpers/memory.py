@@ -318,7 +318,15 @@ class Memory:
         doc = Document(text, metadata=metadata)
         ids = await self.insert_documents([doc])
         if not ids:
-            raise RuntimeError("insert_documents returned no IDs (Cognee insert likely failed)")
+            preview = (text or "")[:120].replace("\n", " ")
+            area = metadata.get("area", Memory.Area.MAIN.value) if metadata else Memory.Area.MAIN.value
+            raise RuntimeError(
+                "Memory.insert_text: cognee.add returned no IDs "
+                f"(dataset={self.dataset_name!r}, area={area!r}, "
+                f"text_len={len(text)}, metadata_keys={list(metadata.keys()) if metadata else []}, "
+                f"preview={preview!r}). "
+                "See prior 'Cognee insert failed' log lines for the underlying exception."
+            )
         return ids[0]
 
     async def insert_documents(self, docs: list[Document]) -> list[str]:
@@ -341,7 +349,12 @@ class Memory:
                 ids.append(content_id)
                 CogneeBackgroundWorker.get_instance().mark_dirty(self.dataset_name)
             except Exception as e:
-                PrintStyle.error(f"Cognee insert failed: {e}")
+                preview = (doc.page_content or "")[:120].replace("\n", " ")
+                PrintStyle.error(
+                    f"Cognee insert failed: {type(e).__name__}: {e} "
+                    f"(dataset={self.dataset_name!r}, area={area!r}, "
+                    f"text_len={len(doc.page_content)}, preview={preview!r})"
+                )
 
         _invalidate_dashboard_cache()
         return ids

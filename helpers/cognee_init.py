@@ -215,11 +215,13 @@ async def _create_db_tables():
             return
 
     _sync_missing_columns()
-    _purge_stale_graph_dbs()
+    affected_datasets = _purge_stale_graph_dbs()
+    if affected_datasets:
+        await _reset_cognify_status_for_datasets(affected_datasets)
     PrintStyle.standard("Cognee DB tables initialized")
 
 
-def _purge_stale_graph_dbs() -> None:
+def _purge_stale_graph_dbs() -> set[str]:
     """Detect and wipe stale Kuzu/Ladybug graph DBs that can't be auto-migrated.
 
     After upgrading cognee 0.5.x -> 1.0.1, the bundled graph backend switched from
@@ -233,18 +235,24 @@ def _purge_stale_graph_dbs() -> None:
         Error: Direct memory insertion failed: list index out of range
 
     The underlying data in SQLite + LanceDB is intact -- only the graph layer is
-    unreadable. The safest recovery is to delete the unreadable graph files; the
-    next cognify() run rebuilds the graph from the preserved sources.
+    unreadable. The safest recovery is to delete the unreadable graph files and
+    reset the cognify pipeline status so the graph rebuilds on next cognify().
+
+    Returns:
+        Set of dataset UUIDs (as strings) whose graph DBs were purged. Caller
+        should reset pipeline run status for these so cognify actually re-runs
+        (cognify_pipeline skips datasets marked DATASET_PROCESSING_COMPLETED).
     """
+    affected_dataset_ids: set[str] = set()
     try:
         import struct
 
         system_storage = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
         if not system_storage:
-            return
+            return affected_dataset_ids
         databases_dir = os.path.join(system_storage, "databases")
         if not os.path.isdir(databases_dir):
-            return
+            return affected_dataset_ids
 
         # Known storage-version codes supported by cognee's Kuzu migration table.
         KNOWN_CODES = {34, 35, 36, 37, 38, 39}
@@ -289,18 +297,109 @@ def _purge_stale_graph_dbs() -> None:
                     if os.path.exists(wal_file):
                         os.remove(wal_file)
                     purged_count += 1
+                    # The parent dir name is the dataset UUID (cognee layout).
+                    affected_dataset_ids.add(entry)
                     PrintStyle.warning(
-                        f"Purged stale graph DB (unsupported version_code={version_code}): {graph_db_dir}"
+                        f"Purged stale graph DB (unsupported version_code={version_code}, "
+                        f"dataset_id={entry}): {graph_db_dir}"
                     )
                 except Exception as e:
                     PrintStyle.error(f"Failed to purge stale graph DB {graph_db_dir}: {e}")
 
         if purged_count:
             PrintStyle.warning(
-                f"Purged {purged_count} stale graph DB(s). They will be rebuilt on next cognify()."
+                f"Purged {purged_count} stale graph DB(s). Will reset cognify_pipeline "
+                f"status for affected datasets so the graph rebuilds."
             )
     except Exception as e:
         PrintStyle.error(f"Stale graph DB detection failed (non-fatal): {e}")
+
+    return affected_dataset_ids
+
+
+async def _reset_cognify_status_for_datasets(dataset_ids: set[str]) -> None:
+    """Reset cognify_pipeline status for ALL datasets (robust rebuild after purge).
+
+    We reset status for every dataset (not just those whose graph DB folder we
+    could identify), because:
+      1. Cognee's on-disk layout isn't documented as stable -- a purged folder
+         name may or may not map 1:1 to a dataset UUID.
+      2. After a major backend upgrade, it's safer to re-cognify everything
+         than to silently leave some datasets with a stale graph.
+      3. Data in SQLite + LanceDB is unchanged, so re-cognify is idempotent
+         and non-destructive.
+
+    Also marks every dataset as dirty so the background worker picks them up
+    without waiting for a new insert.
+    """
+    if not dataset_ids:
+        return
+    try:
+        import cognee
+        from cognee.modules.pipelines.layers.reset_dataset_pipeline_run_status import (
+            reset_dataset_pipeline_run_status,
+        )
+        from cognee.modules.users.methods import get_default_user
+    except Exception as e:
+        PrintStyle.error(
+            f"Cannot import cognee reset helpers: {e}. "
+            f"Graph will NOT auto-rebuild -- re-add data or call cognify manually."
+        )
+        return
+
+    try:
+        user = await get_default_user()
+    except Exception as e:
+        PrintStyle.error(
+            f"Could not resolve default cognee user: {e}. Graph will NOT auto-rebuild."
+        )
+        return
+
+    try:
+        all_datasets = await cognee.datasets.list_datasets()
+    except Exception as e:
+        PrintStyle.error(
+            f"Could not list datasets to reset cognify status: {e}. "
+            f"Graph will NOT auto-rebuild -- re-add data or call cognify manually."
+        )
+        return
+
+    reset_count = 0
+    dataset_names: list[str] = []
+    for ds in all_datasets:
+        try:
+            await reset_dataset_pipeline_run_status(
+                ds.id, user, pipeline_names=["cognify_pipeline"]
+            )
+            reset_count += 1
+            if getattr(ds, "name", None):
+                dataset_names.append(ds.name)
+        except Exception as e:
+            PrintStyle.warning(
+                f"Failed to reset cognify_pipeline status for dataset "
+                f"{getattr(ds, 'name', ds.id)}: {e}"
+            )
+
+    if reset_count:
+        PrintStyle.standard(
+            f"Reset cognify_pipeline status for {reset_count} dataset(s). "
+            f"Graph will rebuild on next cognify()."
+        )
+
+    try:
+        from .cognee_background import CogneeBackgroundWorker
+
+        worker = CogneeBackgroundWorker.get_instance()
+        for name in dataset_names:
+            worker.mark_dirty(name)
+        if dataset_names:
+            PrintStyle.standard(
+                f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild: {dataset_names}"
+            )
+    except Exception as e:
+        PrintStyle.warning(
+            f"Could not mark datasets dirty (graph will rebuild on next insert instead): {e}"
+        )
 
 
 def _sync_missing_columns():
