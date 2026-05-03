@@ -317,6 +317,8 @@ class Memory:
     async def insert_text(self, text: str, metadata: dict = {}) -> str:
         doc = Document(text, metadata=metadata)
         ids = await self.insert_documents([doc])
+        if not ids:
+            raise RuntimeError("insert_documents returned no IDs (Cognee insert likely failed)")
         return ids[0]
 
     async def insert_documents(self, docs: list[Document]) -> list[str]:

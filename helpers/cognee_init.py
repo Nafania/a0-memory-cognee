@@ -215,7 +215,92 @@ async def _create_db_tables():
             return
 
     _sync_missing_columns()
+    _purge_stale_graph_dbs()
     PrintStyle.standard("Cognee DB tables initialized")
+
+
+def _purge_stale_graph_dbs() -> None:
+    """Detect and wipe stale Kuzu/Ladybug graph DBs that can't be auto-migrated.
+
+    After upgrading cognee 0.5.x -> 1.0.1, the bundled graph backend switched from
+    old Kuzu to Ladybug (renamed Kuzu with a new storage format). Cognee's built-in
+    auto-migration only covers Kuzu 0.7.0-0.11.0 transitions; the Kuzu->Ladybug
+    jump is not handled and surfaces as a flood of errors like:
+
+        Failed to initialize Ladybug database: Could not map version_code to proper Ladybug version.
+        Error: cognee.search failed: ...
+        Error: Cognee insert failed: ...
+        Error: Direct memory insertion failed: list index out of range
+
+    The underlying data in SQLite + LanceDB is intact -- only the graph layer is
+    unreadable. The safest recovery is to delete the unreadable graph files; the
+    next cognify() run rebuilds the graph from the preserved sources.
+    """
+    try:
+        import struct
+
+        system_storage = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
+        if not system_storage:
+            return
+        databases_dir = os.path.join(system_storage, "databases")
+        if not os.path.isdir(databases_dir):
+            return
+
+        # Known storage-version codes supported by cognee's Kuzu migration table.
+        KNOWN_CODES = {34, 35, 36, 37, 38, 39}
+        purged_count = 0
+
+        for entry in os.listdir(databases_dir):
+            entry_path = os.path.join(databases_dir, entry)
+            if not os.path.isdir(entry_path):
+                continue
+
+            for sub in os.listdir(entry_path):
+                if not sub.endswith(".pkl"):
+                    continue
+                graph_db_dir = os.path.join(entry_path, sub)
+                catalog = os.path.join(graph_db_dir, "catalog.kz")
+                if not os.path.isfile(catalog):
+                    continue
+
+                try:
+                    with open(catalog, "rb") as f:
+                        f.seek(4)
+                        data = f.read(8)
+                    if len(data) < 8:
+                        continue
+                    version_code = struct.unpack("<Q", data)[0]
+                except Exception:
+                    continue
+
+                # If the catalog reports an unsupported code, the DB is unreadable
+                # by both the installed Ladybug and cognee's migrator. Purge it.
+                if version_code in KNOWN_CODES:
+                    continue
+
+                try:
+                    import shutil
+
+                    shutil.rmtree(graph_db_dir, ignore_errors=True)
+                    lock_file = graph_db_dir + ".lock"
+                    if os.path.exists(lock_file):
+                        os.remove(lock_file)
+                    wal_file = graph_db_dir + ".wal"
+                    if os.path.exists(wal_file):
+                        os.remove(wal_file)
+                    purged_count += 1
+                    PrintStyle.warning(
+                        f"Purged stale graph DB (unsupported version_code={version_code}): {graph_db_dir}"
+                    )
+                except Exception as e:
+                    PrintStyle.error(f"Failed to purge stale graph DB {graph_db_dir}: {e}")
+
+        if purged_count:
+            PrintStyle.warning(
+                f"Purged {purged_count} stale graph DB(s). They will be rebuilt on next cognify()."
+            )
+    except Exception as e:
+        PrintStyle.error(f"Stale graph DB detection failed (non-fatal): {e}")
 
 
 def _sync_missing_columns():
