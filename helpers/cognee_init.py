@@ -31,6 +31,11 @@ _PROVIDER_MAP: dict[str, str] = {
     "gemini": "gemini",
     "ollama": "ollama",
     "lmstudio": "custom",
+    # Agent Zero's OAuth wrapper for OpenAI/Codex (see plugins/_oauth/conf/model_providers.yaml).
+    # Agent Zero proxies requests via 127.0.0.1/oauth/codex/v1 and swaps the dummy
+    # api_key="oauth" for the real OAuth token at the proxy layer, so cognee just
+    # needs to treat it as a plain OpenAI provider.
+    "codex_oauth": "openai",
 }
 
 _EMBED_DIMENSIONS: dict[str, int] = {
@@ -66,6 +71,55 @@ def get_cognee_setting(name: str, default: T) -> T:
 
 def _map_provider(a0_provider: str) -> str:
     return _PROVIDER_MAP.get(a0_provider.lower(), a0_provider)
+
+
+def _resolve_provider_with_defaults(
+    a0_provider: str, model_type: str = "chat"
+) -> tuple[str, dict[str, str]]:
+    """Resolve Agent Zero provider id -> (cognee/litellm provider, default kwargs).
+
+    Agent Zero stores only ``provider`` and ``name`` in _model_config; per-provider
+    defaults like ``api_base`` and the OAuth dummy ``api_key`` live in
+    ``conf/model_providers.yaml`` and are merged only at runtime inside
+    ``_merge_provider_defaults`` (see Agent Zero ``models.py``).
+
+    This mirrors that merge for cognee so providers such as ``codex_oauth``
+    (which proxies through ``http://127.0.0.1/oauth/codex/v1`` and uses a dummy
+    key of ``"oauth"``) work out of the box.
+
+    Returns:
+        (final_provider_name, extra_kwargs) where extra_kwargs may contain
+        ``api_base`` and ``api_key`` defaults from the provider registry.
+    """
+    if not a0_provider:
+        return "", {}
+
+    provider_key = a0_provider.lower()
+    # Our static fallback map handles providers not in Agent Zero's registry.
+    mapped = _PROVIDER_MAP.get(provider_key, provider_key)
+    extra: dict[str, str] = {}
+
+    try:
+        from helpers.providers import get_provider_config  # type: ignore
+
+        cfg = get_provider_config(model_type, provider_key)
+        if isinstance(cfg, dict):
+            litellm_provider = str(cfg.get("litellm_provider") or "").strip().lower()
+            if litellm_provider:
+                mapped = litellm_provider
+            provider_kwargs = cfg.get("kwargs") if isinstance(cfg, dict) else None
+            if isinstance(provider_kwargs, dict):
+                for k in ("api_base", "api_key"):
+                    v = provider_kwargs.get(k)
+                    if isinstance(v, str) and v:
+                        extra[k] = v
+    except Exception as e:
+        PrintStyle.warning(
+            f"Could not load Agent Zero provider registry for '{a0_provider}' "
+            f"(model_type={model_type}): {e}. Falling back to static map."
+        )
+
+    return mapped, extra
 
 
 def _get_api_key(provider: str, api_keys: dict[str, str] | None = None) -> str:
@@ -140,8 +194,15 @@ def configure_cognee() -> None:
         return
 
     # --- LLM ---
-    llm_provider = _map_provider(util_provider)
-    llm_api_key = util_cfg.get("api_key", "") or _models.get_api_key(util_provider)
+    llm_provider, llm_extra = _resolve_provider_with_defaults(util_provider, "chat")
+    # User-set values in _model_config win over registry defaults (same as Agent Zero's
+    # _merge_provider_defaults which uses setdefault).
+    llm_api_key = (
+        util_cfg.get("api_key", "")
+        or _models.get_api_key(util_provider)
+        or llm_extra.get("api_key", "")
+    )
+    util_api_base = util_cfg.get("api_base", "") or llm_extra.get("api_base", "")
 
     try:
         cognee.config.set_llm_config({
@@ -149,7 +210,6 @@ def configure_cognee() -> None:
             "llm_model": util_model,
             "llm_api_key": llm_api_key,
         })
-        util_api_base = util_cfg.get("api_base", "")
         if util_api_base:
             cognee.config.set_llm_endpoint(util_api_base)
     except Exception as e:
@@ -157,14 +217,19 @@ def configure_cognee() -> None:
         os.environ["LLM_PROVIDER"] = llm_provider
         os.environ["LLM_MODEL"] = util_model
         os.environ["LLM_API_KEY"] = llm_api_key
-        util_api_base = util_cfg.get("api_base", "")
         if util_api_base:
             os.environ["LLM_API_BASE"] = util_api_base
 
     # --- Embedding ---
-    embed_provider = _map_provider(embed_cfg.get("provider", ""))
+    raw_embed_provider = embed_cfg.get("provider", "")
+    embed_provider, embed_extra = _resolve_provider_with_defaults(raw_embed_provider, "embedding")
     embed_model = embed_cfg.get("name", "")
-    embed_api_key = embed_cfg.get("api_key", "") or _models.get_api_key(embed_cfg.get("provider", ""))
+    embed_api_key = (
+        embed_cfg.get("api_key", "")
+        or _models.get_api_key(raw_embed_provider)
+        or embed_extra.get("api_key", "")
+    )
+    embed_api_base = embed_cfg.get("api_base", "") or embed_extra.get("api_base", "")
 
     if embed_provider in ("huggingface", "fastembed"):
         os.environ["EMBEDDING_PROVIDER"] = "fastembed"
@@ -176,7 +241,6 @@ def configure_cognee() -> None:
             embed_model = f"{embed_provider}/{embed_model}"
         os.environ["EMBEDDING_MODEL"] = embed_model
     os.environ["EMBEDDING_API_KEY"] = embed_api_key
-    embed_api_base = embed_cfg.get("api_base", "")
     if embed_api_base:
         os.environ["EMBEDDING_API_BASE"] = embed_api_base
 
