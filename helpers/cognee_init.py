@@ -311,8 +311,6 @@ def _purge_stale_graph_dbs() -> set[str]:
     """
     affected_dataset_ids: set[str] = set()
     try:
-        import struct
-
         system_storage = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
         if not system_storage:
             return affected_dataset_ids
@@ -320,66 +318,13 @@ def _purge_stale_graph_dbs() -> set[str]:
         if not os.path.isdir(databases_dir):
             return affected_dataset_ids
 
-        # Known storage-version codes supported by cognee's Kuzu migration table.
-        KNOWN_CODES = {34, 35, 36, 37, 38, 39}
         purged_count = 0
 
-        for root, dirs, files_in_dir in os.walk(databases_dir, topdown=True):
-            if "catalog.kz" not in files_in_dir:
-                continue
-
-            graph_db_dir = root
-            if os.path.abspath(graph_db_dir) == os.path.abspath(databases_dir):
-                PrintStyle.warning(
-                    f"Skipping suspicious Ladybug catalog at databases root: {graph_db_dir}"
-                )
-                continue
-
-            catalog = os.path.join(graph_db_dir, "catalog.kz")
-            try:
-                with open(catalog, "rb") as f:
-                    f.seek(4)
-                    data = f.read(8)
-                if len(data) < 8:
-                    continue
-                version_code = struct.unpack("<Q", data)[0]
-            except Exception:
-                continue
-
-            # If the catalog reports an unsupported code, the DB is unreadable
-            # by both the installed Ladybug and cognee's migrator. Purge it.
-            if version_code in KNOWN_CODES:
-                continue
-
-            try:
-                import shutil
-
-                shutil.rmtree(graph_db_dir, ignore_errors=True)
-                for sibling in (graph_db_dir + ".lock", graph_db_dir + ".wal"):
-                    if os.path.exists(sibling):
-                        os.remove(sibling)
-
-                # Prevent os.walk from descending into a directory we just removed.
-                dirs[:] = []
+        for graph_path in _iter_ladybug_graph_candidates(databases_dir):
+            purged, marker = _purge_graph_db_if_unreadable(graph_path, databases_dir)
+            if purged:
                 purged_count += 1
-
-                relative_path = os.path.relpath(graph_db_dir, databases_dir)
-                affected_marker = (
-                    relative_path.split(os.sep, 1)[0]
-                    if relative_path and relative_path != "."
-                    else "__global_graph__"
-                )
-                # _reset_cognify_status_for_datasets resets all datasets when this
-                # set is non-empty, so this marker only needs to indicate that some
-                # graph was purged. Cognee graph paths are not documented as stable.
-                affected_dataset_ids.add(affected_marker)
-
-                PrintStyle.warning(
-                    f"Purged stale graph DB (unsupported version_code={version_code}, "
-                    f"marker={affected_marker}): {graph_db_dir}"
-                )
-            except Exception as e:
-                PrintStyle.error(f"Failed to purge stale graph DB {graph_db_dir}: {e}")
+                affected_dataset_ids.add(marker)
 
         if purged_count:
             PrintStyle.warning(
@@ -390,6 +335,135 @@ def _purge_stale_graph_dbs() -> set[str]:
         PrintStyle.error(f"Stale graph DB detection failed (non-fatal): {e}")
 
     return affected_dataset_ids
+
+
+def _iter_ladybug_graph_candidates(databases_dir: str) -> list[str]:
+    """Return likely local Ladybug/Kuzu graph DB roots under Cognee databases dir."""
+    candidates: set[str] = set()
+    for root, dirs, files_in_dir in os.walk(databases_dir, topdown=True):
+        is_graph_dir = (
+            "catalog.kz" in files_in_dir
+            and os.path.abspath(root) != os.path.abspath(databases_dir)
+        )
+        if is_graph_dir:
+            candidates.add(root)
+            # Directory graph DB: the catalog belongs to this root, not a
+            # separate file-based DB candidate.
+            dirs[:] = []
+            continue
+
+        for file_name in files_in_dir:
+            # File-based Kuzu/Ladybug DBs are supported by Cognee's own migration
+            # helper. Avoid lock/WAL files and obvious relational/vector files.
+            if file_name.endswith((".lock", ".wal", ".sqlite", ".db", ".json", ".log")):
+                continue
+            path = os.path.join(root, file_name)
+            if _read_ladybug_version_code(path) is not None:
+                candidates.add(path)
+
+        # If a directory is a graph DB, do not report its internal files as
+        # separate candidates; the root deletion handles the whole database.
+        dirs[:] = [
+            d
+            for d in dirs
+            if os.path.join(root, d) not in candidates
+        ]
+
+    return sorted(candidates, key=lambda p: (p.count(os.sep), p))
+
+
+def _read_ladybug_version_code(graph_path: str) -> int | None:
+    """Read Kuzu/Ladybug storage code from a graph dir or file, if it looks like one."""
+    try:
+        import struct
+
+        version_file_path = (
+            os.path.join(graph_path, "catalog.kz") if os.path.isdir(graph_path) else graph_path
+        )
+        if not os.path.isfile(version_file_path):
+            return None
+
+        with open(version_file_path, "rb") as f:
+            magic = f.read(4)
+            if not (magic.startswith(b"KUZ") or magic == b"LBUG"):
+                return None
+            data = f.read(8)
+        if len(data) < 8:
+            return None
+        return struct.unpack("<Q", data)[0]
+    except Exception:
+        return None
+
+
+def _is_graph_readable_by_current_ladybug(graph_path: str) -> bool:
+    """Return True if the installed Ladybug can open this graph DB as-is."""
+    try:
+        import ladybug
+
+        db = ladybug.Database(graph_path)
+        try:
+            # init_database creates schema when needed and is what Cognee calls
+            # before issuing queries. If this succeeds, the graph is not stale.
+            db.init_database()
+        finally:
+            close = getattr(db, "close", None)
+            if callable(close):
+                close()
+        return True
+    except Exception:
+        return False
+
+
+def _is_known_legacy_ladybug_code(version_code: int | None) -> bool:
+    # Known storage-version codes supported by cognee's Kuzu migration table.
+    return version_code in {34, 35, 36, 37, 38, 39}
+
+
+def _purge_graph_db_if_unreadable(graph_path: str, databases_dir: str) -> tuple[bool, str]:
+    version_code = _read_ladybug_version_code(graph_path)
+    if version_code is None:
+        return False, ""
+
+    if _is_graph_readable_by_current_ladybug(graph_path):
+        return False, ""
+
+    # If Cognee's migrator knows the legacy code, let Cognee attempt its normal
+    # export/import path instead of deleting potentially recoverable graph data.
+    if _is_known_legacy_ladybug_code(version_code):
+        PrintStyle.warning(
+            f"Graph DB is not directly readable by current Ladybug but has known "
+            f"legacy version_code={version_code}; leaving it for Cognee migration: {graph_path}"
+        )
+        return False, ""
+
+    try:
+        import shutil
+
+        if os.path.isdir(graph_path):
+            shutil.rmtree(graph_path, ignore_errors=True)
+        elif os.path.exists(graph_path):
+            os.remove(graph_path)
+
+        for sibling in (graph_path + ".lock", graph_path + ".wal"):
+            if os.path.isdir(sibling):
+                shutil.rmtree(sibling, ignore_errors=True)
+            elif os.path.exists(sibling):
+                os.remove(sibling)
+
+        relative_path = os.path.relpath(graph_path, databases_dir)
+        marker = (
+            relative_path.split(os.sep, 1)[0]
+            if relative_path and relative_path != "."
+            else "__global_graph__"
+        )
+        PrintStyle.warning(
+            f"Purged unreadable stale graph DB (unsupported version_code={version_code}, "
+            f"marker={marker}): {graph_path}"
+        )
+        return True, marker
+    except Exception as e:
+        PrintStyle.error(f"Failed to purge stale graph DB {graph_path}: {e}")
+        return False, ""
 
 
 async def _reset_cognify_status_for_datasets(dataset_ids: set[str]) -> None:
