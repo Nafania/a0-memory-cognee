@@ -11,7 +11,7 @@ Replaces the builtin FAISS-based `_memory` plugin with an embedded [Cognee](http
 - **Memory feedback** — durable disk queue forwards user feedback (positive/negative) to Cognee's feedback API.
 - **FAISS migration** — on install, existing FAISS data under `usr/memory/` is automatically migrated to Cognee.
 - **Full dashboard** — WebUI memory dashboard with search, dynamic area filtering, bulk delete, export, and knowledge graph view.
-- **Cognee 1.0.1** — uses Cognee V2 APIs where beneficial (`improve()`, `forget()`, `run_startup_migrations()`).
+- **Cognee 1.0.7** — uses Cognee V2 APIs where beneficial (`improve()`, `forget()`, `run_startup_migrations()`) and is exact-pinned because Cognee storage and dependency migrations can affect production data.
 
 ## Installation
 
@@ -43,7 +43,7 @@ Then restart Agent Zero or toggle the plugin off/on in **Settings → Plugins**.
 ### What happens on install
 
 The `hooks.py` install hook will:
-- `pip install cognee[fastembed]~=1.0.1` (pinned in `requirements.txt`)
+- `pip install cognee[fastembed]==1.0.7` (exact-pinned in `requirements.txt`)
 - Disable the builtin `_memory` plugin
 - Migrate any existing FAISS data
 

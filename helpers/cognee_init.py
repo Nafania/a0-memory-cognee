@@ -6,6 +6,8 @@ from helpers.settings import get_settings
 from helpers.print_style import PrintStyle
 
 T = TypeVar("T")
+_UNSET = object()
+_CURRENT_LADYBUG_VERSION_CODE: int | None | object = _UNSET
 
 _COGNEE_DEFAULTS: dict[str, Any] = {
     "cognee_search_type": "GRAPH_COMPLETION",
@@ -262,6 +264,7 @@ def configure_cognee() -> None:
 
 
 async def _create_db_tables():
+    _patch_lancedb_migration_defaults()
     try:
         from cognee.run_migrations import run_startup_migrations
 
@@ -283,6 +286,54 @@ async def _create_db_tables():
     if affected_datasets:
         await _reset_cognify_status_for_datasets(affected_datasets)
     PrintStyle.standard("Cognee DB tables initialized")
+
+
+def _patch_lancedb_migration_defaults() -> None:
+    """Patch Cognee 1.0.7 LanceDB migration defaults for old vector rows.
+
+    Cognee's generated LanceDB payload schema makes source_* fields required
+    even though the original Pydantic model defaults them to None. Existing
+    1.0.1-era rows do not contain those fields, so startup migration aborts
+    before rebuilding the table. Adding explicit None defaults lets Cognee's own
+    migration preserve rows instead of skipping them.
+    """
+    try:
+        from cognee.infrastructure.databases.vector.lancedb.LanceDBAdapter import (
+            LanceDBAdapter,
+        )
+
+        if getattr(LanceDBAdapter, "_a0_memory_cognee_defaults_patch", False):
+            return
+
+        original = LanceDBAdapter._get_payload_defaults
+
+        def _patched_get_payload_defaults(self, payload_schema):
+            defaults = dict(original(self, payload_schema) or {})
+            try:
+                schema_model = self.get_data_point_schema(payload_schema)
+                fields = getattr(schema_model, "model_fields", {})
+            except Exception:
+                fields = {}
+
+            for key in (
+                "source_pipeline",
+                "source_task",
+                "source_node_set",
+                "source_user",
+                "source_content_hash",
+            ):
+                if key in fields and key not in defaults:
+                    defaults[key] = None
+
+            if "metadata" in fields and "metadata" not in defaults:
+                defaults["metadata"] = {}
+
+            return defaults
+
+        LanceDBAdapter._get_payload_defaults = _patched_get_payload_defaults
+        LanceDBAdapter._a0_memory_cognee_defaults_patch = True
+    except Exception as e:
+        PrintStyle.warning(f"Could not patch LanceDB migration defaults: {e}")
 
 
 def _purge_stale_graph_dbs() -> set[str]:
@@ -414,6 +465,27 @@ def _is_graph_readable_by_current_ladybug(graph_path: str) -> bool:
         return False
 
 
+def _current_ladybug_version_code() -> int | None:
+    """Return the storage-version code produced by the installed Ladybug."""
+    global _CURRENT_LADYBUG_VERSION_CODE
+    if _CURRENT_LADYBUG_VERSION_CODE is not _UNSET:
+        return _CURRENT_LADYBUG_VERSION_CODE  # type: ignore[return-value]
+
+    try:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            graph_path = os.path.join(tmp_dir, "current_ladybug_graph")
+            if not _is_graph_readable_by_current_ladybug(graph_path):
+                _CURRENT_LADYBUG_VERSION_CODE = None
+                return None
+            _CURRENT_LADYBUG_VERSION_CODE = _read_ladybug_version_code(graph_path)
+            return _CURRENT_LADYBUG_VERSION_CODE  # type: ignore[return-value]
+    except Exception:
+        _CURRENT_LADYBUG_VERSION_CODE = None
+        return None
+
+
 def _is_known_legacy_ladybug_code(version_code: int | None) -> bool:
     # Known storage-version codes supported by cognee's Kuzu migration table.
     return version_code in {34, 35, 36, 37, 38, 39}
@@ -425,6 +497,17 @@ def _purge_graph_db_if_unreadable(graph_path: str, databases_dir: str) -> tuple[
         return False, ""
 
     if _is_graph_readable_by_current_ladybug(graph_path):
+        return False, ""
+
+    # Current-version graph DBs can be temporarily unreadable if another Agent
+    # Zero/Cognee process holds the database. Do not delete a DB whose storage
+    # version matches the installed Ladybug writer.
+    current_version_code = _current_ladybug_version_code()
+    if current_version_code is not None and version_code == current_version_code:
+        PrintStyle.warning(
+            f"Graph DB is temporarily unreadable but matches current Ladybug "
+            f"version_code={version_code}; keeping it: {graph_path}"
+        )
         return False, ""
 
     # If Cognee's migrator knows the legacy code, let Cognee attempt its normal

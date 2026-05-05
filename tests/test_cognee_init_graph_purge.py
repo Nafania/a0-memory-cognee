@@ -92,6 +92,50 @@ def _run_purge_with_system_root(cognee_init, system_root: Path) -> set[str]:
 
 
 class StaleGraphDbPurgeTest(unittest.TestCase):
+    def tearDown(self):
+        for name in list(sys.modules):
+            if name.startswith("cognee.infrastructure.databases.vector.lancedb"):
+                sys.modules.pop(name, None)
+
+    def test_patches_lancedb_migration_defaults_for_source_fields(self):
+        cognee_init = _load_cognee_init_module()
+
+        module_name = "cognee.infrastructure.databases.vector.lancedb.LanceDBAdapter"
+        fake_module = types.ModuleType(module_name)
+
+        class PayloadSchema:
+            model_fields = {
+                "id": object(),
+                "source_pipeline": object(),
+                "source_task": object(),
+                "source_node_set": object(),
+                "source_user": object(),
+                "source_content_hash": object(),
+                "metadata": object(),
+                "text": object(),
+            }
+
+        class LanceDBAdapter:
+            def _get_payload_defaults(self, payload_schema):
+                return {"id": "", "text": ""}
+
+            def get_data_point_schema(self, payload_schema):
+                return PayloadSchema
+
+        fake_module.LanceDBAdapter = LanceDBAdapter
+        sys.modules[module_name] = fake_module
+
+        cognee_init._patch_lancedb_migration_defaults()
+
+        defaults = LanceDBAdapter()._get_payload_defaults(object())
+        self.assertEqual(defaults["source_pipeline"], None)
+        self.assertEqual(defaults["source_task"], None)
+        self.assertEqual(defaults["source_node_set"], None)
+        self.assertEqual(defaults["source_user"], None)
+        self.assertEqual(defaults["source_content_hash"], None)
+        self.assertEqual(defaults["metadata"], {})
+        self.assertEqual(defaults["text"], "")
+
     def test_purges_stale_graph_dirs_without_pkl_suffix(self):
         cognee_init = _load_cognee_init_module()
 
@@ -155,7 +199,7 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             self.assertFalse(affected)
             self.assertTrue(current_graph.exists())
 
-    def test_purges_unreadable_current_lbug_file_graph_dbs(self):
+    def test_keeps_unreadable_graph_when_version_matches_current_ladybug(self):
         cognee_init = _load_cognee_init_module()
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -163,7 +207,30 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             graph_file = system_root / "databases" / "cognee_graph_ladybug"
             _write_graph_file(graph_file, 40, magic=b"LBUG")
 
-            affected = _run_purge_with_system_root(cognee_init, system_root)
+            original = cognee_init._current_ladybug_version_code
+            cognee_init._current_ladybug_version_code = lambda: 40
+            try:
+                affected = _run_purge_with_system_root(cognee_init, system_root)
+            finally:
+                cognee_init._current_ladybug_version_code = original
+
+            self.assertFalse(affected)
+            self.assertTrue(graph_file.exists())
+
+    def test_purges_unreadable_lbug_file_with_unknown_non_current_version(self):
+        cognee_init = _load_cognee_init_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_root = Path(tmp_dir) / "cognee_system"
+            graph_file = system_root / "databases" / "cognee_graph_ladybug"
+            _write_graph_file(graph_file, 999, magic=b"LBUG")
+
+            original = cognee_init._current_ladybug_version_code
+            cognee_init._current_ladybug_version_code = lambda: 40
+            try:
+                affected = _run_purge_with_system_root(cognee_init, system_root)
+            finally:
+                cognee_init._current_ladybug_version_code = original
 
             self.assertTrue(affected)
             self.assertFalse(graph_file.exists())
