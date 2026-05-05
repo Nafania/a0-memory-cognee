@@ -303,9 +303,11 @@ def _purge_stale_graph_dbs() -> set[str]:
     reset the cognify pipeline status so the graph rebuilds on next cognify().
 
     Returns:
-        Set of dataset UUIDs (as strings) whose graph DBs were purged. Caller
-        should reset pipeline run status for these so cognify actually re-runs
+        Non-empty set of affected graph markers if any graph DB was purged.
+        Caller should reset pipeline run status so cognify actually re-runs
         (cognify_pipeline skips datasets marked DATASET_PROCESSING_COMPLETED).
+        The markers are intentionally best-effort because Cognee graph paths are
+        not documented as stable across versions.
     """
     affected_dataset_ids: set[str] = set()
     try:
@@ -322,53 +324,62 @@ def _purge_stale_graph_dbs() -> set[str]:
         KNOWN_CODES = {34, 35, 36, 37, 38, 39}
         purged_count = 0
 
-        for entry in os.listdir(databases_dir):
-            entry_path = os.path.join(databases_dir, entry)
-            if not os.path.isdir(entry_path):
+        for root, dirs, files_in_dir in os.walk(databases_dir, topdown=True):
+            if "catalog.kz" not in files_in_dir:
                 continue
 
-            for sub in os.listdir(entry_path):
-                if not sub.endswith(".pkl"):
-                    continue
-                graph_db_dir = os.path.join(entry_path, sub)
-                catalog = os.path.join(graph_db_dir, "catalog.kz")
-                if not os.path.isfile(catalog):
-                    continue
+            graph_db_dir = root
+            if os.path.abspath(graph_db_dir) == os.path.abspath(databases_dir):
+                PrintStyle.warning(
+                    f"Skipping suspicious Ladybug catalog at databases root: {graph_db_dir}"
+                )
+                continue
 
-                try:
-                    with open(catalog, "rb") as f:
-                        f.seek(4)
-                        data = f.read(8)
-                    if len(data) < 8:
-                        continue
-                    version_code = struct.unpack("<Q", data)[0]
-                except Exception:
+            catalog = os.path.join(graph_db_dir, "catalog.kz")
+            try:
+                with open(catalog, "rb") as f:
+                    f.seek(4)
+                    data = f.read(8)
+                if len(data) < 8:
                     continue
+                version_code = struct.unpack("<Q", data)[0]
+            except Exception:
+                continue
 
-                # If the catalog reports an unsupported code, the DB is unreadable
-                # by both the installed Ladybug and cognee's migrator. Purge it.
-                if version_code in KNOWN_CODES:
-                    continue
+            # If the catalog reports an unsupported code, the DB is unreadable
+            # by both the installed Ladybug and cognee's migrator. Purge it.
+            if version_code in KNOWN_CODES:
+                continue
 
-                try:
-                    import shutil
+            try:
+                import shutil
 
-                    shutil.rmtree(graph_db_dir, ignore_errors=True)
-                    lock_file = graph_db_dir + ".lock"
-                    if os.path.exists(lock_file):
-                        os.remove(lock_file)
-                    wal_file = graph_db_dir + ".wal"
-                    if os.path.exists(wal_file):
-                        os.remove(wal_file)
-                    purged_count += 1
-                    # The parent dir name is the dataset UUID (cognee layout).
-                    affected_dataset_ids.add(entry)
-                    PrintStyle.warning(
-                        f"Purged stale graph DB (unsupported version_code={version_code}, "
-                        f"dataset_id={entry}): {graph_db_dir}"
-                    )
-                except Exception as e:
-                    PrintStyle.error(f"Failed to purge stale graph DB {graph_db_dir}: {e}")
+                shutil.rmtree(graph_db_dir, ignore_errors=True)
+                for sibling in (graph_db_dir + ".lock", graph_db_dir + ".wal"):
+                    if os.path.exists(sibling):
+                        os.remove(sibling)
+
+                # Prevent os.walk from descending into a directory we just removed.
+                dirs[:] = []
+                purged_count += 1
+
+                relative_path = os.path.relpath(graph_db_dir, databases_dir)
+                affected_marker = (
+                    relative_path.split(os.sep, 1)[0]
+                    if relative_path and relative_path != "."
+                    else "__global_graph__"
+                )
+                # _reset_cognify_status_for_datasets resets all datasets when this
+                # set is non-empty, so this marker only needs to indicate that some
+                # graph was purged. Cognee graph paths are not documented as stable.
+                affected_dataset_ids.add(affected_marker)
+
+                PrintStyle.warning(
+                    f"Purged stale graph DB (unsupported version_code={version_code}, "
+                    f"marker={affected_marker}): {graph_db_dir}"
+                )
+            except Exception as e:
+                PrintStyle.error(f"Failed to purge stale graph DB {graph_db_dir}: {e}")
 
         if purged_count:
             PrintStyle.warning(
