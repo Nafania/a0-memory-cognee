@@ -151,12 +151,14 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             _write_catalog(nested_legacy_graph, 999)
             _write_catalog(valid_graph, 40)
 
-            original = cognee_init._current_ladybug_version_code
-            cognee_init._current_ladybug_version_code = lambda: 40
+            original = cognee_init._is_graph_readable_by_current_ladybug
+            cognee_init._is_graph_readable_by_current_ladybug = (
+                lambda path: os.path.abspath(path) == os.path.abspath(valid_graph)
+            )
             try:
                 affected = _run_purge_with_system_root(cognee_init, system_root)
             finally:
-                cognee_init._current_ladybug_version_code = original
+                cognee_init._is_graph_readable_by_current_ladybug = original
 
             self.assertTrue(affected)
             self.assertFalse(global_legacy_graph.exists())
@@ -177,12 +179,14 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             (Path(str(stale_graph_file) + ".wal")).write_text("wal")
             (Path(str(stale_graph_file) + ".lock")).write_text("lock")
 
-            original = cognee_init._current_ladybug_version_code
-            cognee_init._current_ladybug_version_code = lambda: 40
+            original = cognee_init._is_graph_readable_by_current_ladybug
+            cognee_init._is_graph_readable_by_current_ladybug = (
+                lambda path: os.path.abspath(path) == os.path.abspath(valid_graph_file)
+            )
             try:
                 affected = _run_purge_with_system_root(cognee_init, system_root)
             finally:
-                cognee_init._current_ladybug_version_code = original
+                cognee_init._is_graph_readable_by_current_ladybug = original
 
             self.assertTrue(affected)
             self.assertFalse(stale_graph_file.exists())
@@ -198,12 +202,7 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             graph_file = system_root / "databases" / "cognee_graph_kuzu"
             _write_graph_file(graph_file, 39)
 
-            original = cognee_init._current_ladybug_version_code
-            cognee_init._current_ladybug_version_code = lambda: 40
-            try:
-                affected = _run_purge_with_system_root(cognee_init, system_root)
-            finally:
-                cognee_init._current_ladybug_version_code = original
+            affected = _run_purge_with_system_root(cognee_init, system_root)
 
             self.assertTrue(affected)
             self.assertFalse(graph_file.exists())
@@ -227,7 +226,7 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             self.assertFalse(affected)
             self.assertTrue(current_graph.exists())
 
-    def test_keeps_unreadable_graph_when_version_matches_current_ladybug(self):
+    def test_purges_unreadable_graph_even_when_version_matches_current_ladybug(self):
         cognee_init = _load_cognee_init_module()
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -235,15 +234,10 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             graph_file = system_root / "databases" / "cognee_graph_ladybug"
             _write_graph_file(graph_file, 40, magic=b"LBUG")
 
-            original = cognee_init._current_ladybug_version_code
-            cognee_init._current_ladybug_version_code = lambda: 40
-            try:
-                affected = _run_purge_with_system_root(cognee_init, system_root)
-            finally:
-                cognee_init._current_ladybug_version_code = original
+            affected = _run_purge_with_system_root(cognee_init, system_root)
 
-            self.assertFalse(affected)
-            self.assertTrue(graph_file.exists())
+            self.assertTrue(affected)
+            self.assertFalse(graph_file.exists())
 
     def test_purges_unreadable_lbug_file_with_unknown_non_current_version(self):
         cognee_init = _load_cognee_init_module()
@@ -253,12 +247,7 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             graph_file = system_root / "databases" / "cognee_graph_ladybug"
             _write_graph_file(graph_file, 999, magic=b"LBUG")
 
-            original = cognee_init._current_ladybug_version_code
-            cognee_init._current_ladybug_version_code = lambda: 40
-            try:
-                affected = _run_purge_with_system_root(cognee_init, system_root)
-            finally:
-                cognee_init._current_ladybug_version_code = original
+            affected = _run_purge_with_system_root(cognee_init, system_root)
 
             self.assertTrue(affected)
             self.assertFalse(graph_file.exists())

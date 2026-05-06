@@ -6,8 +6,6 @@ from helpers.settings import get_settings
 from helpers.print_style import PrintStyle
 
 T = TypeVar("T")
-_UNSET = object()
-_CURRENT_LADYBUG_VERSION_CODE: int | None | object = _UNSET
 
 _COGNEE_DEFAULTS: dict[str, Any] = {
     "cognee_search_type": "GRAPH_COMPLETION",
@@ -465,44 +463,12 @@ def _is_graph_readable_by_current_ladybug(graph_path: str) -> bool:
         return False
 
 
-def _current_ladybug_version_code() -> int | None:
-    """Return the storage-version code produced by the installed Ladybug."""
-    global _CURRENT_LADYBUG_VERSION_CODE
-    if _CURRENT_LADYBUG_VERSION_CODE is not _UNSET:
-        return _CURRENT_LADYBUG_VERSION_CODE  # type: ignore[return-value]
-
-    try:
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            graph_path = os.path.join(tmp_dir, "current_ladybug_graph")
-            if not _is_graph_readable_by_current_ladybug(graph_path):
-                _CURRENT_LADYBUG_VERSION_CODE = None
-                return None
-            _CURRENT_LADYBUG_VERSION_CODE = _read_ladybug_version_code(graph_path)
-            return _CURRENT_LADYBUG_VERSION_CODE  # type: ignore[return-value]
-    except Exception:
-        _CURRENT_LADYBUG_VERSION_CODE = None
-        return None
-
-
 def _purge_graph_db_if_unreadable(graph_path: str, databases_dir: str) -> tuple[bool, str]:
     version_code = _read_ladybug_version_code(graph_path)
     if version_code is None:
         return False, ""
 
     if _is_graph_readable_by_current_ladybug(graph_path):
-        return False, ""
-
-    # Current-version graph DBs can be temporarily unreadable if another Agent
-    # Zero/Cognee process holds the database. Do not delete a DB whose storage
-    # version matches the installed Ladybug writer.
-    current_version_code = _current_ladybug_version_code()
-    if current_version_code is not None and version_code == current_version_code:
-        PrintStyle.warning(
-            f"Graph DB is temporarily unreadable but matches current Ladybug "
-            f"version_code={version_code}; keeping it: {graph_path}"
-        )
         return False, ""
 
     try:
@@ -526,7 +492,7 @@ def _purge_graph_db_if_unreadable(graph_path: str, databases_dir: str) -> tuple[
             else "__global_graph__"
         )
         PrintStyle.warning(
-            f"Purged unreadable stale graph DB (non-current version_code={version_code}, "
+            f"Purged unreadable stale graph DB (version_code={version_code}, "
             f"marker={marker}): {graph_path}"
         )
         return True, marker
