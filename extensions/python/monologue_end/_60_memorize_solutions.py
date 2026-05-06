@@ -1,6 +1,7 @@
 from helpers import plugins, errors
 from helpers.extension import Extension
 from usr.plugins.memory_cognee.helpers.memory import Memory, insert_with_simple_dedup
+from usr.plugins.memory_cognee.helpers.llm_json import parse_llm_json_response
 from helpers.dirty_json import DirtyJson
 from agent import LoopData
 from helpers.log import LogItem
@@ -52,7 +53,7 @@ class MemorizeSolutions(Extension):
                 return
 
             try:
-                solutions = DirtyJson.parse_string(solutions_json)
+                solutions = parse_llm_json_response(solutions_json, DirtyJson.parse_string)
             except Exception as e:
                 log_item.update(heading=f"Failed to parse solutions response: {str(e)}")
                 return

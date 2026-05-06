@@ -105,6 +105,11 @@ class CogneeBackgroundWorker:
                             await cognee.improve(dataset=dataset)
                             PrintStyle.standard(f"Cognee improve completed for dataset: {dataset}")
                         except Exception as e:
+                            if _is_empty_graph_improve_error(e):
+                                PrintStyle.warning(
+                                    f"Cognee improve skipped for {dataset}: graph is empty"
+                                )
+                                continue
                             PrintStyle.error(f"Cognee improve failed for {dataset}: {e}")
                             self._last_error = str(e)
 
@@ -140,3 +145,8 @@ class CogneeBackgroundWorker:
         task = DeferredTask(thread_name=THREAD_BACKGROUND)
         task.start_task(self.run_loop)
         return task
+
+
+def _is_empty_graph_improve_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return "entitynotfounderror" in message and "empty graph projected" in message

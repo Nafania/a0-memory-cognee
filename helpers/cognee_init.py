@@ -122,6 +122,27 @@ def _resolve_provider_with_defaults(
     return mapped, extra
 
 
+def _plugin_root_dir() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _configure_temporal_graph_prompt() -> None:
+    """Point Cognee temporal extraction at an EventList-compatible prompt."""
+    env_key = "TEMPORAL_GRAPH_PROMPT_PATH"
+    if os.environ.get(env_key):
+        return
+
+    prompt_path = os.path.join(
+        _plugin_root_dir(),
+        "prompts",
+        "cognee.generate_event_graph_prompt.txt",
+    )
+    if os.path.exists(prompt_path):
+        os.environ[env_key] = prompt_path
+    else:
+        PrintStyle.warning(f"Cognee temporal prompt not found: {prompt_path}")
+
+
 def _get_api_key(provider: str, api_keys: dict[str, str] | None = None) -> str:
     dotenv.load_dotenv()
     key = dotenv.get_dotenv_value(f"API_KEY_{provider.upper()}")
@@ -162,6 +183,7 @@ def configure_cognee() -> None:
     os.environ["ENABLE_BACKEND_ACCESS_CONTROL"] = "true"
     os.environ["CACHING"] = "true"
     os.environ["CACHE_ADAPTER"] = get_cognee_setting("cognee_session_cache", "filesystem")
+    _configure_temporal_graph_prompt()
 
     PrintStyle.standard(f"Cognee env configured: system={system_storage}, data={data_storage}")
 
@@ -280,6 +302,8 @@ async def _create_db_tables():
             return
 
     _sync_missing_columns()
+    _rewrite_legacy_data_storage_locations()
+    _quarantine_missing_data_files()
     affected_datasets = _purge_stale_graph_dbs()
     affected_datasets.update(await _detect_datasets_missing_graphs())
     if affected_datasets:
@@ -333,6 +357,220 @@ def _patch_lancedb_migration_defaults() -> None:
         LanceDBAdapter._a0_memory_cognee_defaults_patch = True
     except Exception as e:
         PrintStyle.warning(f"Could not patch LanceDB migration defaults: {e}")
+
+
+def _rewrite_legacy_data_storage_locations() -> int:
+    """Rewrite old absolute Cognee file:// data paths to the current data root.
+
+    Cognee stores raw document locations in SQLite. When an Agent Zero `usr`
+    directory is moved between host paths or into Docker, rows can still point at
+    the old absolute `.../usr/cognee/data_storage/<data-id>` path even though the
+    actual files exist under the current DATA_ROOT_DIRECTORY. Rewriting the URI is
+    non-destructive and lets Cognee rebuild graphs from the preserved source text.
+    """
+    try:
+        import sqlite3
+
+        data_root = os.environ.get("DATA_ROOT_DIRECTORY", "")
+        system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
+        if not data_root or not system_root:
+            return 0
+
+        db_path = os.path.join(
+            system_root,
+            "databases",
+            os.environ.get("DB_NAME", "cognee_db"),
+        )
+        if not os.path.exists(db_path):
+            return 0
+
+        updated = 0
+        conn = sqlite3.connect(db_path)
+        try:
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(data)").fetchall()
+            }
+            location_cols = [
+                col
+                for col in ("raw_data_location", "original_data_location")
+                if col in cols
+            ]
+            if not location_cols:
+                return 0
+
+            select_cols = ", ".join(["id", *location_cols])
+            rows = conn.execute(f"SELECT {select_cols} FROM data").fetchall()
+            for row in rows:
+                data_id = row[0]
+                changes: dict[str, str] = {}
+                for col, value in zip(location_cols, row[1:]):
+                    rewritten = _rewrite_data_storage_uri(value, data_root)
+                    if rewritten and rewritten != value:
+                        changes[col] = rewritten
+
+                if not changes:
+                    continue
+
+                assignments = ", ".join(f"{col} = ?" for col in changes)
+                conn.execute(
+                    f"UPDATE data SET {assignments} WHERE id = ?",
+                    [*changes.values(), data_id],
+                )
+                updated += len(changes)
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        if updated:
+            PrintStyle.standard(
+                f"Rewrote {updated} legacy Cognee data storage path(s) "
+                "to current DATA_ROOT_DIRECTORY."
+            )
+        return updated
+    except Exception as e:
+        PrintStyle.warning(f"Legacy Cognee data path rewrite failed (non-fatal): {e}")
+        return 0
+
+
+def _rewrite_data_storage_uri(value: Any, data_root: str) -> str | None:
+    if not isinstance(value, str) or "/data_storage/" not in value:
+        return None
+
+    prefix = "file://"
+    path = value[len(prefix):] if value.startswith(prefix) else value
+    marker = "/data_storage/"
+    marker_index = path.find(marker)
+    if marker_index == -1:
+        return None
+
+    suffix = path[marker_index + len(marker):].lstrip("/")
+    if not suffix:
+        return None
+
+    candidate = os.path.abspath(os.path.join(data_root, suffix))
+    data_root_abs = os.path.abspath(data_root)
+    if not candidate.startswith(data_root_abs + os.sep) and candidate != data_root_abs:
+        return None
+    if not os.path.exists(candidate):
+        return None
+
+    return f"{prefix}{candidate}"
+
+
+def _quarantine_missing_data_files() -> int:
+    """Detach data rows whose preserved source file is no longer present.
+
+    Cognee's cognify pipeline aborts the whole dataset when any data item points
+    at a missing source file. The SQLite row may still be useful for forensic
+    inspection, so we keep it and only remove dataset associations, recording the
+    quarantine reason in a small plugin-owned table.
+    """
+    try:
+        import sqlite3
+
+        system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
+        if not system_root:
+            return 0
+
+        db_path = os.path.join(
+            system_root,
+            "databases",
+            os.environ.get("DB_NAME", "cognee_db"),
+        )
+        if not os.path.exists(db_path):
+            return 0
+
+        conn = sqlite3.connect(db_path)
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if "data" not in tables or "dataset_data" not in tables:
+                return 0
+
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS a0_cognee_quarantined_data ("
+                "data_id TEXT PRIMARY KEY, "
+                "raw_data_location TEXT, "
+                "reason TEXT, "
+                "quarantined_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
+
+            rows = conn.execute(
+                "SELECT id, name, extension, raw_data_location FROM data"
+            ).fetchall()
+            quarantined = 0
+            for data_id, name, extension, raw_location in rows:
+                missing_path = _missing_data_source_path(raw_location, name, extension)
+                if not missing_path:
+                    continue
+
+                assoc_count = conn.execute(
+                    "SELECT COUNT(*) FROM dataset_data WHERE data_id = ?",
+                    (data_id,),
+                ).fetchone()[0]
+                if not assoc_count:
+                    continue
+
+                conn.execute(
+                    "INSERT OR REPLACE INTO a0_cognee_quarantined_data "
+                    "(data_id, raw_data_location, reason) VALUES (?, ?, ?)",
+                    (
+                        data_id,
+                        raw_location,
+                        f"Missing source file: {missing_path}",
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM dataset_data WHERE data_id = ?",
+                    (data_id,),
+                )
+                quarantined += 1
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        if quarantined:
+            PrintStyle.warning(
+                f"Quarantined {quarantined} Cognee data item(s) with missing "
+                "source files so dataset rebuild can continue. Original rows "
+                "were preserved in SQLite."
+            )
+        return quarantined
+    except Exception as e:
+        PrintStyle.warning(f"Missing Cognee source quarantine failed (non-fatal): {e}")
+        return 0
+
+
+def _missing_data_source_path(
+    raw_location: Any,
+    name: Any = None,
+    extension: Any = None,
+) -> str | None:
+    if not isinstance(raw_location, str) or not raw_location.startswith("file://"):
+        return None
+
+    path = raw_location[len("file://"):]
+    if os.path.isfile(path):
+        return None
+
+    if os.path.isdir(path):
+        if isinstance(name, str) and name:
+            suffix = f".{extension}" if isinstance(extension, str) and extension else ""
+            expected_file = os.path.join(path, f"{name}{suffix}")
+            if os.path.isfile(expected_file):
+                return None
+            return expected_file
+        return None
+
+    return path
 
 
 def _purge_stale_graph_dbs() -> set[str]:

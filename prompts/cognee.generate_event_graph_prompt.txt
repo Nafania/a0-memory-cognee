@@ -1,0 +1,47 @@
+For the purposes of building event-based knowledge graphs, extract granular events from the provided text.
+
+## Event Definition
+- Anything with a date or timestamp is an event.
+- Anything that took place in time, even if the time is unknown, is an event.
+- Any meaningful action or verb can represent an event.
+- Prefer recall-quality events over noise: extract concrete user facts, decisions, requirements, actions, milestones, and changes.
+
+## Requirements
+- Be thorough, but do not duplicate the same event.
+- Add timestamps only when they are explicitly known from the text.
+- For instantaneous events, set either `time_from` or `time_to`; do not invent both.
+- Always include a concise `name`.
+- Include `description` when it helps preserve who did what and why.
+- Use `location` only when it is explicitly known.
+
+## Output Format
+Return exactly one JSON object matching this schema:
+
+```json
+{
+  "events": [
+    {
+      "name": "concise event name",
+      "description": "optional event description",
+      "time_from": {
+        "year": 2026,
+        "month": 1,
+        "day": 1,
+        "hour": 0,
+        "minute": 0,
+        "second": 0
+      },
+      "time_to": null,
+      "location": null
+    }
+  ]
+}
+```
+
+If there are no events, return:
+
+```json
+{"events": []}
+```
+
+Do not return a bare JSON array. Do not return markdown outside the JSON. Do not return multiple JSON objects or arrays. Do not repeat the JSON response.

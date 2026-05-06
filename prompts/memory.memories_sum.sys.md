@@ -6,12 +6,14 @@
 # Format
 - The response format is a JSON array of text notes containing facts to memorize
 - If the history does not contain any useful information, the response will be an empty JSON array.
+- Return exactly one JSON array. Do not return multiple JSON arrays or repeat the array.
+- Do not wrap the JSON in markdown or add explanatory text outside the JSON.
 
 # Output example
 ~~~json
 [
   "User's name is John Doe",
-  "User's dog's name is Max",
+  "User's dog's name is Max"
 ]
 ~~~
 

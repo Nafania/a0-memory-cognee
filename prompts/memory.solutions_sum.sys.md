@@ -7,6 +7,8 @@
 - The response format is a JSON array of succesfull solutions containng "problem" and "solution" properties
 - The problem section contains a description of the problem, the solution section contains step by step instructions to solve the problem including necessary details and code.
 - If the history does not contain any helpful technical solutions, the response will be an empty JSON array.
+- Return exactly one JSON array. Do not return multiple JSON arrays or repeat the array.
+- Do not wrap the JSON in markdown or add explanatory text outside the JSON.
 
 # Example when solution found (do not output this example):
 ~~~json

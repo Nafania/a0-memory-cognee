@@ -1,11 +1,13 @@
 import importlib.util
 import asyncio
 import os
+import sqlite3
 import struct
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 
@@ -97,6 +99,162 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
         for name in list(sys.modules):
             if name.startswith("cognee.infrastructure.databases.vector.lancedb"):
                 sys.modules.pop(name, None)
+
+    def test_rewrites_legacy_data_storage_locations_to_current_data_root(self):
+        cognee_init = _load_cognee_init_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            system_root = tmp / "cognee_system"
+            data_root = tmp / "data_storage"
+            db_dir = system_root / "databases"
+            db_dir.mkdir(parents=True)
+
+            data_id = "e0af5892-5ab8-4de4-9418-2f223a330b12"
+            data_dir = data_root / data_id
+            data_dir.mkdir(parents=True)
+            (data_dir / "text_abc.txt").write_text("memory")
+
+            db_path = db_dir / "cognee_db"
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute(
+                    "CREATE TABLE data ("
+                    "id TEXT PRIMARY KEY, "
+                    "raw_data_location TEXT, "
+                    "original_data_location TEXT"
+                    ")"
+                )
+                conn.execute(
+                    "INSERT INTO data VALUES (?, ?, ?)",
+                    (
+                        data_id,
+                        f"file:///old/agent-zero/usr/cognee/data_storage/{data_id}",
+                        f"file:///old/agent-zero/usr/cognee/data_storage/{data_id}/text_abc.txt",
+                    ),
+                )
+                conn.commit()
+
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            old_data_root = os.environ.get("DATA_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            os.environ["DATA_ROOT_DIRECTORY"] = str(data_root)
+            try:
+                self.assertEqual(cognee_init._rewrite_legacy_data_storage_locations(), 2)
+            finally:
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+                if old_data_root is None:
+                    os.environ.pop("DATA_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["DATA_ROOT_DIRECTORY"] = old_data_root
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                raw, original = conn.execute(
+                    "SELECT raw_data_location, original_data_location FROM data WHERE id = ?",
+                    (data_id,),
+                ).fetchone()
+
+            self.assertEqual(raw, f"file://{data_dir}")
+            self.assertEqual(original, f"file://{data_dir / 'text_abc.txt'}")
+
+    def test_does_not_rewrite_legacy_data_storage_location_when_file_is_missing(self):
+        cognee_init = _load_cognee_init_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_root = Path(tmp_dir) / "data_storage"
+            missing_uri = "file:///old/agent-zero/usr/cognee/data_storage/missing-id"
+
+            self.assertIsNone(
+                cognee_init._rewrite_data_storage_uri(missing_uri, str(data_root))
+            )
+
+    def test_quarantines_data_rows_with_missing_source_files_without_deleting_data(self):
+        cognee_init = _load_cognee_init_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            system_root = tmp / "cognee_system"
+            db_dir = system_root / "databases"
+            db_dir.mkdir(parents=True)
+
+            data_id = "dc45cc7ecd36550991797812df968b77"
+            dataset_id = "2ca04e1d-b576-5b33-9d10-626e04003639"
+            missing_file = tmp / "data_storage" / "owner" / "text_missing.txt"
+            missing_file.parent.mkdir(parents=True)
+
+            db_path = db_dir / "cognee_db"
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute(
+                    "CREATE TABLE data ("
+                    "id TEXT PRIMARY KEY, "
+                    "name TEXT, "
+                    "extension TEXT, "
+                    "raw_data_location TEXT"
+                    ")"
+                )
+                conn.execute(
+                    "CREATE TABLE dataset_data (dataset_id TEXT, data_id TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO data VALUES (?, ?, ?, ?)",
+                    (
+                        data_id,
+                        "text_missing",
+                        "txt",
+                        f"file://{missing_file}",
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO dataset_data VALUES (?, ?)",
+                    (dataset_id, data_id),
+                )
+                conn.commit()
+
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            try:
+                self.assertEqual(cognee_init._quarantine_missing_data_files(), 1)
+            finally:
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                data_count = conn.execute(
+                    "SELECT COUNT(*) FROM data WHERE id = ?",
+                    (data_id,),
+                ).fetchone()[0]
+                association_count = conn.execute(
+                    "SELECT COUNT(*) FROM dataset_data WHERE data_id = ?",
+                    (data_id,),
+                ).fetchone()[0]
+                quarantine_count = conn.execute(
+                    "SELECT COUNT(*) FROM a0_cognee_quarantined_data WHERE data_id = ?",
+                    (data_id,),
+                ).fetchone()[0]
+
+            self.assertEqual(data_count, 1)
+            self.assertEqual(association_count, 0)
+            self.assertEqual(quarantine_count, 1)
+
+    def test_keeps_data_row_when_expected_source_file_exists(self):
+        cognee_init = _load_cognee_init_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_dir = Path(tmp_dir) / "data_storage" / "owner"
+            source_dir.mkdir(parents=True)
+            (source_dir / "text_exists.txt").write_text("memory")
+
+            self.assertIsNone(
+                cognee_init._missing_data_source_path(
+                    f"file://{source_dir}",
+                    "text_exists",
+                    "txt",
+                )
+            )
 
     def test_detects_dataset_with_data_but_missing_graph_file(self):
         cognee_init = _load_cognee_init_module()

@@ -7,7 +7,8 @@ _REQUIREMENTS_TXT = os.path.join(_PLUGIN_DIR, "requirements.txt")
 
 
 def install():
-    # 1. Snapshot openai version before cognee install to prevent breakage
+    # 1. Keep OpenAI bounded to the compatible major while allowing Cognee's
+    # LiteLLM dependency to select the required minor/major version.
     result = subprocess.run(
         [sys.executable, "-m", "pip", "show", "openai"],
         capture_output=True, text=True
@@ -17,10 +18,10 @@ def install():
         if line.startswith("Version:"):
             ver = line.split(":", 1)[1].strip()
             major = int(ver.split(".")[0])
-            pinned_openai = f"openai=={ver}" if major < 2 else f"openai<{major + 1}"
+            pinned_openai = "openai<3" if major < 3 else f"openai<{major + 1}"
             break
 
-    # Install from requirements.txt, keeping openai compatible with litellm
+    # Install from requirements.txt, keeping OpenAI below the next breaking major.
     cmd = [sys.executable, "-m", "pip", "install", "-r", _REQUIREMENTS_TXT]
     if pinned_openai:
         cmd.append(pinned_openai)
