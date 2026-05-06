@@ -486,11 +486,6 @@ def _current_ladybug_version_code() -> int | None:
         return None
 
 
-def _is_known_legacy_ladybug_code(version_code: int | None) -> bool:
-    # Known storage-version codes supported by cognee's Kuzu migration table.
-    return version_code in {34, 35, 36, 37, 38, 39}
-
-
 def _purge_graph_db_if_unreadable(graph_path: str, databases_dir: str) -> tuple[bool, str]:
     version_code = _read_ladybug_version_code(graph_path)
     if version_code is None:
@@ -507,15 +502,6 @@ def _purge_graph_db_if_unreadable(graph_path: str, databases_dir: str) -> tuple[
         PrintStyle.warning(
             f"Graph DB is temporarily unreadable but matches current Ladybug "
             f"version_code={version_code}; keeping it: {graph_path}"
-        )
-        return False, ""
-
-    # If Cognee's migrator knows the legacy code, let Cognee attempt its normal
-    # export/import path instead of deleting potentially recoverable graph data.
-    if _is_known_legacy_ladybug_code(version_code):
-        PrintStyle.warning(
-            f"Graph DB is not directly readable by current Ladybug but has known "
-            f"legacy version_code={version_code}; leaving it for Cognee migration: {graph_path}"
         )
         return False, ""
 
@@ -540,7 +526,7 @@ def _purge_graph_db_if_unreadable(graph_path: str, databases_dir: str) -> tuple[
             else "__global_graph__"
         )
         PrintStyle.warning(
-            f"Purged unreadable stale graph DB (unsupported version_code={version_code}, "
+            f"Purged unreadable stale graph DB (non-current version_code={version_code}, "
             f"marker={marker}): {graph_path}"
         )
         return True, marker
