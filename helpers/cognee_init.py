@@ -281,6 +281,7 @@ async def _create_db_tables():
 
     _sync_missing_columns()
     affected_datasets = _purge_stale_graph_dbs()
+    affected_datasets.update(await _detect_datasets_missing_graphs())
     if affected_datasets:
         await _reset_cognify_status_for_datasets(affected_datasets)
     PrintStyle.standard("Cognee DB tables initialized")
@@ -384,6 +385,65 @@ def _purge_stale_graph_dbs() -> set[str]:
         PrintStyle.error(f"Stale graph DB detection failed (non-fatal): {e}")
 
     return affected_dataset_ids
+
+
+async def _detect_datasets_missing_graphs() -> set[str]:
+    """Find datasets that still have data but no graph DB after cleanup.
+
+    This catches the restart after a purge: the unreadable graph files are gone,
+    so there is nothing left to purge, but Cognee search still sees an empty
+    knowledge graph until cognify runs again.
+    """
+    missing_graph_datasets: set[str] = set()
+    try:
+        import cognee
+
+        system_storage = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
+        if not system_storage:
+            return missing_graph_datasets
+        databases_dir = os.path.join(system_storage, "databases")
+        if not os.path.isdir(databases_dir):
+            return missing_graph_datasets
+
+        graph_candidates = _iter_ladybug_graph_candidates(databases_dir)
+        graph_file_names = {os.path.basename(path) for path in graph_candidates}
+        all_datasets = await cognee.datasets.list_datasets()
+
+        for ds in all_datasets:
+            dataset_id = str(getattr(ds, "id", "") or "")
+            dataset_name = str(getattr(ds, "name", "") or dataset_id)
+            if not dataset_id:
+                continue
+
+            has_graph_file = any(
+                file_name == dataset_id
+                or file_name.startswith(f"{dataset_id}.")
+                or file_name.startswith(f"{dataset_id}_")
+                for file_name in graph_file_names
+            )
+            if has_graph_file:
+                continue
+
+            try:
+                data_items = await cognee.datasets.list_data(ds.id)
+            except Exception as e:
+                PrintStyle.warning(
+                    f"Could not inspect data items for dataset {dataset_name}: {e}"
+                )
+                continue
+
+            if data_items:
+                missing_graph_datasets.add(dataset_id)
+
+        if missing_graph_datasets:
+            PrintStyle.warning(
+                f"Detected {len(missing_graph_datasets)} dataset(s) with data but no "
+                f"graph DB after cleanup. Will reset cognify_pipeline so graph rebuilds."
+            )
+    except Exception as e:
+        PrintStyle.warning(f"Missing graph DB detection failed (non-fatal): {e}")
+
+    return missing_graph_datasets
 
 
 def _iter_ladybug_graph_candidates(databases_dir: str) -> list[str]:

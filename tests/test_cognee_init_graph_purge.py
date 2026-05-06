@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 import os
 import struct
 import sys
@@ -96,6 +97,79 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
         for name in list(sys.modules):
             if name.startswith("cognee.infrastructure.databases.vector.lancedb"):
                 sys.modules.pop(name, None)
+
+    def test_detects_dataset_with_data_but_missing_graph_file(self):
+        cognee_init = _load_cognee_init_module()
+
+        dataset_id = "00afc710-2c0c-5d61-957e-c452672842ae"
+        fake_cognee = types.ModuleType("cognee")
+
+        class Datasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id=dataset_id, name="default")]
+
+            async def list_data(self, ds_id):
+                return [types.SimpleNamespace(id="data-1")]
+
+        fake_cognee.datasets = Datasets()
+        old_cognee = sys.modules.get("cognee")
+        sys.modules["cognee"] = fake_cognee
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_root = Path(tmp_dir) / "cognee_system"
+            (system_root / "databases").mkdir(parents=True)
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            try:
+                missing = asyncio.run(cognee_init._detect_datasets_missing_graphs())
+            finally:
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+                if old_cognee is None:
+                    sys.modules.pop("cognee", None)
+                else:
+                    sys.modules["cognee"] = old_cognee
+
+        self.assertEqual(missing, {dataset_id})
+
+    def test_does_not_mark_dataset_missing_when_graph_file_exists(self):
+        cognee_init = _load_cognee_init_module()
+
+        dataset_id = "00afc710-2c0c-5d61-957e-c452672842ae"
+        fake_cognee = types.ModuleType("cognee")
+
+        class Datasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id=dataset_id, name="default")]
+
+            async def list_data(self, ds_id):
+                return [types.SimpleNamespace(id="data-1")]
+
+        fake_cognee.datasets = Datasets()
+        old_cognee = sys.modules.get("cognee")
+        sys.modules["cognee"] = fake_cognee
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_root = Path(tmp_dir) / "cognee_system"
+            graph_file = system_root / "databases" / "owner-1" / f"{dataset_id}.pkl"
+            _write_graph_file(graph_file, 40, magic=b"LBUG")
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            try:
+                missing = asyncio.run(cognee_init._detect_datasets_missing_graphs())
+            finally:
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+                if old_cognee is None:
+                    sys.modules.pop("cognee", None)
+                else:
+                    sys.modules["cognee"] = old_cognee
+
+        self.assertFalse(missing)
 
     def test_patches_lancedb_migration_defaults_for_source_fields(self):
         cognee_init = _load_cognee_init_module()
