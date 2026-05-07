@@ -329,6 +329,58 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
 
         self.assertFalse(missing)
 
+    def test_detects_dataset_with_data_but_empty_graph(self):
+        cognee_init = _load_cognee_init_module()
+
+        dataset_id = "00afc710-2c0c-5d61-957e-c452672842ae"
+        fake_cognee = types.ModuleType("cognee")
+
+        class Datasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id=dataset_id, name="default")]
+
+            async def list_data(self, ds_id):
+                return [types.SimpleNamespace(id="data-1")]
+
+        fake_cognee.datasets = Datasets()
+        fake_graph_module = types.ModuleType(
+            "usr.plugins.memory_cognee.helpers.cognee_graph"
+        )
+
+        async def read_dataset_graphs(cognee, dataset_names=None, **kwargs):
+            return [
+                types.SimpleNamespace(
+                    dataset_id=dataset_id,
+                    dataset_name="default",
+                    data_count=3034,
+                    nodes=[],
+                    edges=[],
+                    graph_empty=True,
+                    error=None,
+                )
+            ]
+
+        fake_graph_module.read_dataset_graphs = read_dataset_graphs
+        old_cognee = sys.modules.get("cognee")
+        old_graph = sys.modules.get("usr.plugins.memory_cognee.helpers.cognee_graph")
+        sys.modules["cognee"] = fake_cognee
+        sys.modules["usr.plugins.memory_cognee.helpers.cognee_graph"] = fake_graph_module
+        try:
+            unready = asyncio.run(cognee_init._detect_datasets_with_unready_graphs())
+        finally:
+            if old_cognee is None:
+                sys.modules.pop("cognee", None)
+            else:
+                sys.modules["cognee"] = old_cognee
+            if old_graph is None:
+                sys.modules.pop("usr.plugins.memory_cognee.helpers.cognee_graph", None)
+            else:
+                sys.modules[
+                    "usr.plugins.memory_cognee.helpers.cognee_graph"
+                ] = old_graph
+
+        self.assertEqual(unready, {dataset_id})
+
     def test_patches_lancedb_migration_defaults_for_source_fields(self):
         cognee_init = _load_cognee_init_module()
 

@@ -306,6 +306,7 @@ async def _create_db_tables():
     _quarantine_missing_data_files()
     affected_datasets = _purge_stale_graph_dbs()
     affected_datasets.update(await _detect_datasets_missing_graphs())
+    affected_datasets.update(await _detect_datasets_with_unready_graphs())
     if affected_datasets:
         await _reset_cognify_status_for_datasets(affected_datasets)
     PrintStyle.standard("Cognee DB tables initialized")
@@ -682,6 +683,46 @@ async def _detect_datasets_missing_graphs() -> set[str]:
         PrintStyle.warning(f"Missing graph DB detection failed (non-fatal): {e}")
 
     return missing_graph_datasets
+
+
+async def _detect_datasets_with_unready_graphs() -> set[str]:
+    """Find datasets that have data but an empty or unreadable dataset graph."""
+    unready_dataset_ids: set[str] = set()
+    try:
+        import cognee
+
+        try:
+            from usr.plugins.memory_cognee.helpers.cognee_graph import read_dataset_graphs
+        except Exception:
+            from .cognee_graph import read_dataset_graphs
+
+        dataset_graphs = await read_dataset_graphs(
+            cognee,
+            skip_empty_data=True,
+            repair_unreadable=True,
+        )
+        for graph in dataset_graphs:
+            dataset_id = str(getattr(graph, "dataset_id", "") or "")
+            dataset_name = str(getattr(graph, "dataset_name", "") or dataset_id)
+            data_count = getattr(graph, "data_count", None)
+            if data_count is not None and data_count <= 0:
+                continue
+
+            graph_error = getattr(graph, "error", None)
+            graph_empty = getattr(graph, "graph_empty", None)
+            nodes = getattr(graph, "nodes", []) or []
+            is_unready = bool(graph_error) or graph_empty is True or not nodes
+            if is_unready and dataset_id:
+                unready_dataset_ids.add(dataset_id)
+                detail = f": {graph_error}" if graph_error else ""
+                PrintStyle.warning(
+                    f"Detected dataset '{dataset_name}' with data but an unready "
+                    f"knowledge graph. Will reset cognify_pipeline{detail}"
+                )
+    except Exception as e:
+        PrintStyle.warning(f"Unready graph detection failed (non-fatal): {e}")
+
+    return unready_dataset_ids
 
 
 def _iter_ladybug_graph_candidates(databases_dir: str) -> list[str]:
