@@ -1,0 +1,168 @@
+import asyncio
+import importlib.util
+import os
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class FakeDirtyWorker:
+    def __init__(self):
+        self.dirty: list[str] = []
+
+    def mark_dirty(self, dataset_name: str):
+        self.dirty.append(dataset_name)
+
+
+def _load_memory_module(tmp_dir: str, worker: FakeDirtyWorker):
+    helpers = types.ModuleType("helpers")
+
+    files = types.ModuleType("helpers.files")
+    files.get_abs_path = lambda *parts: os.path.join(tmp_dir, *parts)
+
+    print_style = types.ModuleType("helpers.print_style")
+
+    class PrintStyle:
+        @staticmethod
+        def error(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def warning(*args, **kwargs):
+            pass
+
+    print_style.PrintStyle = PrintStyle
+
+    log = types.ModuleType("helpers.log")
+    log.Log = object
+    log.LogItem = object
+
+    package_names = [
+        "usr",
+        "usr.plugins",
+        "usr.plugins.memory_cognee",
+        "usr.plugins.memory_cognee.helpers",
+    ]
+    for name in package_names:
+        package = types.ModuleType(name)
+        package.__path__ = []
+        sys.modules[name] = package
+
+    knowledge_import = types.ModuleType("usr.plugins.memory_cognee.helpers.knowledge_import")
+
+    def load_knowledge(log_item, path, index, metadata, **kwargs):
+        if "doc.md" not in index:
+            index["doc.md"] = {
+                "state": "changed",
+                "documents": [types.SimpleNamespace(page_content="knowledge text")],
+                "metadata": metadata,
+            }
+        return index
+
+    knowledge_import.load_knowledge = load_knowledge
+    knowledge_import.KnowledgeImport = dict
+
+    cognee_init = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_init")
+    cognee_init.get_cognee_setting = lambda key, default=None: default
+
+    background = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_background")
+
+    class CogneeBackgroundWorker:
+        @staticmethod
+        def get_instance():
+            return worker
+
+    background.CogneeBackgroundWorker = CogneeBackgroundWorker
+
+    sys.modules.update(
+        {
+            "helpers": helpers,
+            "helpers.files": files,
+            "helpers.print_style": print_style,
+            "helpers.log": log,
+            "agent": types.SimpleNamespace(Agent=object, AgentContext=object),
+            "models": types.ModuleType("models"),
+            "usr.plugins.memory_cognee.helpers.knowledge_import": knowledge_import,
+            "usr.plugins.memory_cognee.helpers.cognee_init": cognee_init,
+            "usr.plugins.memory_cognee.helpers.cognee_background": background,
+        }
+    )
+
+    module_path = REPO_ROOT / "helpers" / "memory.py"
+    spec = importlib.util.spec_from_file_location(
+        "usr.plugins.memory_cognee.helpers.memory",
+        module_path,
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class MemoryDirtyMarkingTest(unittest.TestCase):
+    def tearDown(self):
+        for name in list(sys.modules):
+            if (
+                name == "helpers"
+                or name.startswith("helpers.")
+                or name == "agent"
+                or name == "models"
+                or name.startswith("usr.plugins.memory_cognee")
+            ):
+                sys.modules.pop(name, None)
+
+    def test_delete_marks_dataset_dirty(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+            memory_module._get_cognee = lambda: (types.SimpleNamespace(), None)
+
+            async def find_dataset(dataset_name):
+                return types.SimpleNamespace(id="dataset-id", name=dataset_name)
+
+            async def try_delete_direct(cognee, target, data_id):
+                return True
+
+            memory_module._find_dataset = find_dataset
+            memory_module._try_delete_direct = try_delete_direct
+
+            memory = memory_module.Memory("default", "default")
+            removed = asyncio.run(memory.delete_documents_by_ids(["data-id"]))
+
+            self.assertEqual(len(removed), 1)
+            self.assertEqual(worker.dirty, ["default"])
+
+    def test_preload_knowledge_marks_dataset_dirty_after_import(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+
+            class FakeCognee:
+                def __init__(self):
+                    self.added: list[tuple[str, str, list[str]]] = []
+                    self.datasets = types.SimpleNamespace(list_datasets=self.list_datasets)
+
+                async def list_datasets(self):
+                    return []
+
+                async def add(self, content, *, dataset_name, node_set):
+                    self.added.append((content, dataset_name, node_set))
+
+            fake_cognee = FakeCognee()
+            memory_module._get_cognee = lambda: (fake_cognee, None)
+
+            memory = memory_module.Memory("default", "default")
+            asyncio.run(memory.preload_knowledge(None, ["default"], "default"))
+
+            self.assertEqual(fake_cognee.added, [("knowledge text", "default", ["main"])])
+            self.assertEqual(worker.dirty, ["default"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -426,6 +426,58 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             self.assertFalse(Path(str(stale_graph_file) + ".lock").exists())
             self.assertTrue(valid_graph_file.exists())
 
+    def test_startup_purge_does_not_delete_dataset_scoped_pkl_from_probe_alone(self):
+        cognee_init = _load_cognee_init_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_root = Path(tmp_dir) / "cognee_system"
+            graph_file = (
+                system_root
+                / "databases"
+                / "owner-1"
+                / "48287602-4f24-5feb-a495-6cdf50bb0e1d.pkl"
+            )
+            _write_graph_file(graph_file, 40)
+
+            original = cognee_init._is_graph_readable_by_current_ladybug
+            cognee_init._is_graph_readable_by_current_ladybug = lambda path: False
+            try:
+                affected = _run_purge_with_system_root(cognee_init, system_root)
+            finally:
+                cognee_init._is_graph_readable_by_current_ladybug = original
+
+            self.assertFalse(affected)
+            self.assertTrue(graph_file.exists())
+
+    def test_forced_dataset_purge_deletes_unreadable_pkl_after_cognee_read_failure(self):
+        cognee_init = _load_cognee_init_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_root = Path(tmp_dir) / "cognee_system"
+            graph_file = (
+                system_root
+                / "databases"
+                / "owner-1"
+                / "48287602-4f24-5feb-a495-6cdf50bb0e1d.pkl"
+            )
+            _write_graph_file(graph_file, 40)
+
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            original = cognee_init._is_graph_readable_by_current_ladybug
+            cognee_init._is_graph_readable_by_current_ladybug = lambda path: False
+            try:
+                purged = cognee_init.purge_unreadable_graph_db(str(graph_file))
+            finally:
+                cognee_init._is_graph_readable_by_current_ladybug = original
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+
+            self.assertTrue(purged)
+            self.assertFalse(graph_file.exists())
+
     def test_purges_unreadable_legacy_graph_even_if_cognee_knows_version_code(self):
         cognee_init = _load_cognee_init_module()
 

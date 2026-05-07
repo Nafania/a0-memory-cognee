@@ -178,8 +178,9 @@ class Memory:
             if entry["state"] in ["changed", "removed"] and entry.get("ids", []):
                 all_ids_to_delete.update(entry["ids"])
 
+        changed = False
         if all_ids_to_delete:
-            await _batch_delete_by_ids(self.dataset_name, all_ids_to_delete)
+            changed = await _batch_delete_by_ids(self.dataset_name, all_ids_to_delete) > 0
 
         for file_key in index:
             entry = index[file_key]
@@ -195,6 +196,7 @@ class Memory:
                             node_set=[area],
                         )
                         new_ids.append(content_hash_id(content, self.dataset_name))
+                        changed = True
                     except Exception as e:
                         PrintStyle.error(f"Failed to import knowledge: {e}")
                 entry["ids"] = new_ids
@@ -208,6 +210,10 @@ class Memory:
                 del index[file_key]["state"]
         with open(index_path, "w") as f:
             json.dump(index, f)
+
+        if changed:
+            _mark_dataset_dirty(self.dataset_name)
+            _invalidate_dashboard_cache()
 
     def _preload_knowledge_folders(
         self,
@@ -280,8 +286,10 @@ class Memory:
             include_default=False,
         )
         if docs:
-            await _delete_matching_data_items(self.dataset_name, docs)
-            _invalidate_dashboard_cache()
+            deleted = await _delete_matching_data_items(self.dataset_name, docs)
+            if deleted:
+                _mark_dataset_dirty(self.dataset_name)
+                _invalidate_dashboard_cache()
         return docs
 
     async def delete_documents_by_ids(self, ids: list[str]) -> list[Document]:
@@ -319,6 +327,7 @@ class Memory:
             PrintStyle.error(f"Failed to delete from {self.dataset_name}: {e}")
 
         if removed:
+            _mark_dataset_dirty(self.dataset_name)
             _invalidate_dashboard_cache()
         return removed
 
@@ -737,6 +746,15 @@ def _invalidate_dashboard_cache():
         invalidate_dashboard_cache()
     except Exception:
         pass
+
+
+def _mark_dataset_dirty(dataset_name: str) -> None:
+    try:
+        from .cognee_background import CogneeBackgroundWorker
+
+        CogneeBackgroundWorker.get_instance().mark_dirty(dataset_name)
+    except Exception as e:
+        PrintStyle.warning(f"Could not mark Cognee dataset dirty ({dataset_name}): {e}")
 
 
 def get_custom_knowledge_subdir_abs(agent: Agent) -> str:

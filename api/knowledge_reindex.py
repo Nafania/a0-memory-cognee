@@ -9,7 +9,17 @@ class ReindexKnowledge(ApiHandler):
             raise Exception("No context id provided")
         context = self.use_context(ctxid)
 
-        await memory.Memory.reload(context.agent0)
+        mem = await memory.Memory.reload(context.agent0)
+        from usr.plugins.memory_cognee.helpers.cognee_init import (
+            reset_cognify_status_for_all_datasets,
+        )
+
+        await reset_cognify_status_for_all_datasets()
+        from usr.plugins.memory_cognee.helpers.cognee_background import (
+            CogneeBackgroundWorker,
+        )
+
+        CogneeBackgroundWorker.get_instance().mark_dirty(mem.dataset_name)
         context.log.set_initial_progress()
 
         return {

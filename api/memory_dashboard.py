@@ -322,13 +322,54 @@ class MemoryDashboard(ApiHandler):
 
     async def _get_graph_data(self, input: dict) -> dict:
         try:
-            from cognee.infrastructure.databases.graph import get_graph_engine
+            import cognee
+            from usr.plugins.memory_cognee.helpers.cognee_graph import read_dataset_graphs
 
             node_limit = int(input.get("node_limit", 300))
+            dataset_filter = input.get("datasets")
+            if isinstance(dataset_filter, str):
+                dataset_names = [dataset_filter]
+            elif isinstance(dataset_filter, list):
+                dataset_names = [str(name) for name in dataset_filter if name]
+            else:
+                dataset_names = None
 
-            graph_engine = await get_graph_engine()
-            is_empty = await graph_engine.is_empty()
-            if is_empty:
+            dataset_graphs = await read_dataset_graphs(
+                cognee,
+                dataset_names,
+                skip_empty_data=True,
+                repair_unreadable=True,
+            )
+            graph_errors = [
+                {"dataset": graph.dataset_name, "error": graph.error}
+                for graph in dataset_graphs
+                if graph.error
+            ]
+
+            nodes_raw = []
+            edges_raw = []
+            for graph in dataset_graphs:
+                for node_id, props in graph.nodes:
+                    clean_props = dict(props) if isinstance(props, dict) else {}
+                    clean_props.setdefault("dataset", graph.dataset_name)
+                    clean_props.setdefault("dataset_id", graph.dataset_id)
+                    scoped_node_id = f"{graph.dataset_id}:{node_id}"
+                    nodes_raw.append((scoped_node_id, clean_props))
+
+                for edge_tuple in graph.edges:
+                    if len(edge_tuple) < 3:
+                        continue
+                    src, tgt, rel_name = edge_tuple[0], edge_tuple[1], edge_tuple[2]
+                    edge_props = edge_tuple[3] if len(edge_tuple) > 3 else {}
+                    scoped_edge = (
+                        f"{graph.dataset_id}:{src}",
+                        f"{graph.dataset_id}:{tgt}",
+                        rel_name,
+                        edge_props,
+                    )
+                    edges_raw.append(scoped_edge)
+
+            if not nodes_raw:
                 return {
                     "success": True,
                     "nodes": [],
@@ -340,9 +381,9 @@ class MemoryDashboard(ApiHandler):
                     "node_types": [],
                     "empty": True,
                     "truncated": False,
+                    "graph_errors": graph_errors,
                 }
 
-            nodes_raw, edges_raw = await graph_engine.get_graph_data()
             total_node_count = len(nodes_raw)
             total_edge_count = len(edges_raw)
 
@@ -403,6 +444,7 @@ class MemoryDashboard(ApiHandler):
                 "node_types": sorted(node_types),
                 "empty": False,
                 "truncated": truncated,
+                "graph_errors": graph_errors,
             }
         except Exception as e:
             import traceback

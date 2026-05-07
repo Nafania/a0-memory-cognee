@@ -533,8 +533,6 @@ class MemoryConsolidator:
             new_content = update_info.get('new_content', '')
 
             if memory_id and new_content:
-                await db.delete_documents_by_ids([memory_id])
-
                 updated_metadata = {
                     'area': area,
                     'timestamp': self._get_timestamp(),
@@ -544,8 +542,20 @@ class MemoryConsolidator:
                     **update_info.get('metadata', {})
                 }
 
-                new_id = await db.insert_text(new_content, updated_metadata)
-                updated_count += 1
+                try:
+                    new_id = await db.insert_text(new_content, updated_metadata)
+                except Exception as e:
+                    PrintStyle().warning(
+                        f"Failed to insert updated memory for {memory_id}: {e}"
+                    )
+                    continue
+
+                removed = await db.delete_documents_by_ids([memory_id])
+                if not removed:
+                    PrintStyle().warning(
+                        f"Inserted updated memory {new_id}, but old memory "
+                        f"{memory_id} was not deleted"
+                    )
                 updated_ids.append(new_id)
 
         new_memory_id = None

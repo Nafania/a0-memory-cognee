@@ -761,9 +761,21 @@ def _is_graph_readable_by_current_ladybug(graph_path: str) -> bool:
         return False
 
 
-def _purge_graph_db_if_unreadable(graph_path: str, databases_dir: str) -> tuple[bool, str]:
+def _purge_graph_db_if_unreadable(
+    graph_path: str,
+    databases_dir: str,
+    *,
+    force: bool = False,
+) -> tuple[bool, str]:
     version_code = _read_ladybug_version_code(graph_path)
     if version_code is None:
+        return False, ""
+
+    # Dataset-scoped Cognee 1.x graph files use the Kuzu adapter and can be
+    # falsely rejected by opening them directly with raw Ladybug. Do not purge
+    # these from a format probe alone; runtime graph reads repair them only when
+    # Cognee's own dataset-context engine actually fails.
+    if graph_path.endswith(".pkl") and not force:
         return False, ""
 
     if _is_graph_readable_by_current_ladybug(graph_path):
@@ -799,6 +811,21 @@ def _purge_graph_db_if_unreadable(graph_path: str, databases_dir: str) -> tuple[
         return False, ""
 
 
+def purge_unreadable_graph_db(graph_path: str) -> bool:
+    """Purge a known graph DB path if the installed Ladybug/Kuzu cannot read it."""
+    system_storage = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
+    databases_dir = os.path.join(system_storage, "databases") if system_storage else ""
+    if not databases_dir:
+        databases_dir = os.path.dirname(os.path.abspath(graph_path))
+
+    purged, _marker = _purge_graph_db_if_unreadable(
+        graph_path,
+        databases_dir,
+        force=True,
+    )
+    return purged
+
+
 async def _reset_cognify_status_for_datasets(dataset_ids: set[str]) -> None:
     """Reset cognify_pipeline status for ALL datasets (robust rebuild after purge).
 
@@ -818,22 +845,10 @@ async def _reset_cognify_status_for_datasets(dataset_ids: set[str]) -> None:
         return
     try:
         import cognee
-        from cognee.modules.pipelines.layers.reset_dataset_pipeline_run_status import (
-            reset_dataset_pipeline_run_status,
-        )
-        from cognee.modules.users.methods import get_default_user
     except Exception as e:
         PrintStyle.error(
-            f"Cannot import cognee reset helpers: {e}. "
+            f"Cannot import cognee dataset helpers: {e}. "
             f"Graph will NOT auto-rebuild -- re-add data or call cognify manually."
-        )
-        return
-
-    try:
-        user = await get_default_user()
-    except Exception as e:
-        PrintStyle.error(
-            f"Could not resolve default cognee user: {e}. Graph will NOT auto-rebuild."
         )
         return
 
@@ -848,23 +863,17 @@ async def _reset_cognify_status_for_datasets(dataset_ids: set[str]) -> None:
 
     reset_count = 0
     dataset_names: list[str] = []
+    dataset_id_values = []
     for ds in all_datasets:
-        try:
-            await reset_dataset_pipeline_run_status(
-                ds.id, user, pipeline_names=["cognify_pipeline"]
-            )
-            reset_count += 1
-            if getattr(ds, "name", None):
-                dataset_names.append(ds.name)
-        except Exception as e:
-            PrintStyle.warning(
-                f"Failed to reset cognify_pipeline status for dataset "
-                f"{getattr(ds, 'name', ds.id)}: {e}"
-            )
+        dataset_id_values.append(ds.id)
+        if getattr(ds, "name", None):
+            dataset_names.append(ds.name)
+
+    reset_count = await _delete_pipeline_runs_for_dataset_ids(dataset_id_values)
 
     if reset_count:
         PrintStyle.standard(
-            f"Reset cognify_pipeline status for {reset_count} dataset(s). "
+            f"Reset pipeline status for {reset_count} dataset(s). "
             f"Graph will rebuild on next cognify()."
         )
 
@@ -882,6 +891,111 @@ async def _reset_cognify_status_for_datasets(dataset_ids: set[str]) -> None:
         PrintStyle.warning(
             f"Could not mark datasets dirty (graph will rebuild on next insert instead): {e}"
         )
+
+
+async def reset_cognify_status_for_dataset_names(dataset_names: list[str]) -> list[str]:
+    """Reset cognify_pipeline status for explicit dataset names and return those reset."""
+    clean_names = {name for name in dataset_names if name}
+    if not clean_names:
+        return []
+
+    try:
+        import cognee
+    except Exception as e:
+        PrintStyle.error(f"Cannot import cognee dataset helpers: {e}")
+        return []
+
+    try:
+        all_datasets = await cognee.datasets.list_datasets()
+    except Exception as e:
+        PrintStyle.error(f"Could not prepare cognify status reset: {e}")
+        return []
+
+    reset_names: list[str] = []
+    dataset_id_values = []
+    for ds in all_datasets:
+        name = getattr(ds, "name", None)
+        if name not in clean_names:
+            continue
+        dataset_id_values.append(ds.id)
+        reset_names.append(name)
+
+    reset_count = await _delete_pipeline_runs_for_dataset_ids(dataset_id_values)
+
+    if reset_count:
+        PrintStyle.standard(f"Reset pipeline status for dataset(s): {reset_names}")
+    return reset_names
+
+
+async def reset_cognify_status_for_all_datasets() -> None:
+    """Reset cognify_pipeline status for every dataset and mark them dirty."""
+    await _reset_cognify_status_for_datasets({"manual_reindex"})
+
+
+async def _delete_pipeline_runs_for_dataset_ids(dataset_ids: list) -> int:
+    """Clear Cognee pipeline metadata so the next cognify is not skipped."""
+    if not dataset_ids:
+        return 0
+
+    try:
+        from sqlalchemy import delete
+        from sqlalchemy import select
+        from cognee.infrastructure.databases.relational import get_relational_engine
+        from cognee.modules.data.models import Data
+        from cognee.modules.pipelines.models import PipelineRun
+        from sqlalchemy.orm.attributes import flag_modified
+    except Exception as e:
+        PrintStyle.error(f"Cannot import Cognee pipeline models for reset: {e}")
+        return 0
+
+    dataset_id_strings = {str(dataset_id) for dataset_id in dataset_ids}
+
+    try:
+        db_engine = get_relational_engine()
+        async with db_engine.get_async_session() as session:
+            result = await session.execute(
+                delete(PipelineRun).where(PipelineRun.dataset_id.in_(dataset_ids))
+            )
+            rows = (await session.execute(select(Data))).scalars().all()
+            data_reset_count = 0
+            for row in rows:
+                status = getattr(row, "pipeline_status", None)
+                if not isinstance(status, dict):
+                    continue
+
+                changed = False
+                new_status = {}
+                for pipeline_name, dataset_statuses in status.items():
+                    if not isinstance(dataset_statuses, dict):
+                        new_status[pipeline_name] = dataset_statuses
+                        continue
+
+                    remaining = {
+                        dataset_id: item_status
+                        for dataset_id, item_status in dataset_statuses.items()
+                        if str(dataset_id) not in dataset_id_strings
+                    }
+                    if len(remaining) != len(dataset_statuses):
+                        changed = True
+                    if remaining:
+                        new_status[pipeline_name] = remaining
+
+                if changed:
+                    row.pipeline_status = new_status
+                    flag_modified(row, "pipeline_status")
+                    data_reset_count += 1
+
+            await session.commit()
+            deleted = int(getattr(result, "rowcount", 0) or 0)
+    except Exception as e:
+        PrintStyle.error(f"Failed to delete Cognee pipeline status rows: {e}")
+        return 0
+
+    if data_reset_count:
+        PrintStyle.standard(
+            f"Reset pipeline status metadata for {data_reset_count} data item(s)."
+        )
+    return len(dataset_ids) if deleted else 0
 
 
 def _sync_missing_columns():
