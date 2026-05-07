@@ -262,6 +262,14 @@ class Memory:
             PrintStyle.error(f"cognee.search failed: {e}")
             return []
 
+        if not results:
+            from .cognee_background import CogneeBackgroundWorker
+
+            CogneeBackgroundWorker.get_instance().nudge_rebuild_if_unready(
+                datasets,
+                "empty search result",
+            )
+
         return _results_to_documents(results or [], limit)
 
     async def delete_documents_by_query(

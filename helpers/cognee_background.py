@@ -17,9 +17,11 @@ class CogneeBackgroundWorker:
 
     def __init__(self) -> None:
         self._dirty_datasets: Set[str] = set()
+        self._dirty_versions: dict[str, int] = {}
         self._insert_count: int = 0
         self._last_cognify_time: float = 0
         self._running: bool = False
+        self._run_scheduled: bool = False
         self._last_error: str | None = None
         self._last_run_datasets: list[str] = []
         self._last_run_success: bool = False
@@ -34,7 +36,9 @@ class CogneeBackgroundWorker:
     def mark_dirty(self, dataset_name: str) -> None:
         """Mark a dataset as having new data."""
         self._dirty_datasets.add(dataset_name)
+        self._dirty_versions[dataset_name] = self._dirty_versions.get(dataset_name, 0) + 1
         self._insert_count += 1
+        self._schedule_run_soon()
 
     def get_status(self) -> dict:
         """Return current status for dashboard."""
@@ -47,6 +51,25 @@ class CogneeBackgroundWorker:
             "last_run_success": self._last_run_success,
             "last_error": self._last_error,
         }
+
+    def nudge_rebuild_if_unready(self, datasets: list[str], reason: str = "") -> bool:
+        """Schedule a rebuild when search runs before any clean cognify pass."""
+        if self._last_run_success or self._running:
+            return False
+
+        clean_datasets = [dataset for dataset in datasets if dataset]
+        if not clean_datasets:
+            return False
+
+        for dataset in clean_datasets:
+            self.mark_dirty(dataset)
+
+        detail = f": {reason}" if reason else ""
+        PrintStyle.warning(
+            f"Cognee graph search returned no context before a successful rebuild; "
+            f"scheduled cognify for {clean_datasets}{detail}"
+        )
+        return True
 
     def _get_config(self) -> dict:
         """Load cognee-related settings."""
@@ -79,6 +102,10 @@ class CogneeBackgroundWorker:
 
         config = self._get_config()
         datasets = list(self._dirty_datasets)
+        dataset_versions = {
+            dataset: self._dirty_versions.get(dataset, 0)
+            for dataset in datasets
+        }
 
         try:
             import cognee
@@ -113,8 +140,13 @@ class CogneeBackgroundWorker:
                             PrintStyle.error(f"Cognee improve failed for {dataset}: {e}")
                             self._last_error = str(e)
 
-                self._dirty_datasets.clear()
-                self._insert_count = 0
+                for dataset in datasets:
+                    if self._dirty_versions.get(dataset, 0) == dataset_versions.get(dataset):
+                        self._dirty_datasets.discard(dataset)
+                        self._dirty_versions.pop(dataset, None)
+
+                if not self._dirty_datasets:
+                    self._insert_count = 0
                 self._last_cognify_time = time.monotonic()
                 self._last_run_success = True
             except Exception as e:
@@ -123,6 +155,8 @@ class CogneeBackgroundWorker:
                 PrintStyle.error("Cognee pipeline failed", str(e))
             finally:
                 self._running = False
+                if self._dirty_datasets:
+                    self._schedule_run_soon()
 
     async def maybe_run_pipeline(self) -> None:
         """Check if pipeline should run based on thresholds, then run if so."""
@@ -145,6 +179,28 @@ class CogneeBackgroundWorker:
         task = DeferredTask(thread_name=THREAD_BACKGROUND)
         task.start_task(self.run_loop)
         return task
+
+    def _schedule_run_soon(self) -> None:
+        """Debounce a near-immediate rebuild from the current event loop."""
+        if self._run_scheduled or self._running:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        self._run_scheduled = True
+        delay = float(get_cognee_setting("cognee_cognify_debounce_seconds", 2))
+        loop.create_task(self._run_after_delay(delay))
+
+    async def _run_after_delay(self, delay: float) -> None:
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._run_scheduled = False
+            await self.run_pipeline()
+        finally:
+            self._run_scheduled = False
 
 
 def _is_empty_graph_improve_error(error: Exception) -> bool:

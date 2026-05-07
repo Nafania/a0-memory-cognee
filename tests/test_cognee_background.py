@@ -118,6 +118,37 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertEqual(status["dirty_datasets"], [])
         self.assertEqual(fake_cognee.improved, ["default"])
 
+    def test_dirty_mark_added_during_cognify_is_not_cleared(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+
+        async def cognify(*, datasets, temporal_cognify):
+            worker.mark_dirty("default")
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+
+        worker.mark_dirty("default")
+        asyncio.run(worker.run_pipeline())
+
+        status = worker.get_status()
+        self.assertTrue(status["last_run_success"])
+        self.assertEqual(status["dirty_datasets"], ["default"])
+
+    def test_empty_search_can_nudge_rebuild_before_first_successful_run(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+
+        nudged = worker.nudge_rebuild_if_unready(["default"], "empty graph")
+
+        self.assertTrue(nudged)
+        self.assertEqual(worker.get_status()["dirty_datasets"], ["default"])
+
 
 if __name__ == "__main__":
     unittest.main()

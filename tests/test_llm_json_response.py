@@ -1,6 +1,6 @@
 import unittest
 
-from helpers.llm_json import parse_llm_json_response
+from helpers.llm_json import format_llm_json_for_log, parse_llm_json_response
 
 
 class LlmJsonResponseTest(unittest.TestCase):
@@ -24,6 +24,15 @@ class LlmJsonResponseTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "multiple JSON roots"):
             parse_llm_json_response(response)
+
+    def test_formats_parsed_json_for_logs_without_concatenated_roots(self):
+        response = '["one", "two"]["one", "two"]'
+        parsed = parse_llm_json_response(response)
+
+        formatted = format_llm_json_for_log(parsed)
+
+        self.assertEqual(formatted, '[\n  "one",\n  "two"\n]')
+        self.assertNotIn("][", formatted)
 
 
 if __name__ == "__main__":

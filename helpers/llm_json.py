@@ -29,6 +29,11 @@ def parse_llm_json_response(
     raise ValueError("Could not parse LLM JSON response")
 
 
+def format_llm_json_for_log(value: Any) -> str:
+    """Render parsed LLM JSON for UI logs without preserving malformed roots."""
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
 def _strip_code_fence(text: str) -> str:
     lines = text.strip().splitlines()
     if len(lines) >= 2 and lines[0].strip().startswith(("```", "~~~")):

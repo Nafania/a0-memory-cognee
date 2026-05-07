@@ -109,6 +109,16 @@ class RecallMemories(Extension):
                 pass
             mem_answers, sol_answers = [], []
 
+        if not mem_answers and not sol_answers:
+            from usr.plugins.memory_cognee.helpers.cognee_background import (
+                CogneeBackgroundWorker,
+            )
+
+            CogneeBackgroundWorker.get_instance().nudge_rebuild_if_unready(
+                datasets,
+                "recall search returned empty context",
+            )
+
         ctx = str(getattr(self.agent.context, "id", "") or "")
         fb_fallback = db.dataset_name
         memories, mem_fb = recall_text_and_feedback_items(

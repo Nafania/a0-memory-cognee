@@ -1,7 +1,10 @@
 from helpers import plugins, errors
 from helpers.extension import Extension
 from usr.plugins.memory_cognee.helpers.memory import Memory, insert_with_simple_dedup
-from usr.plugins.memory_cognee.helpers.llm_json import parse_llm_json_response
+from usr.plugins.memory_cognee.helpers.llm_json import (
+    format_llm_json_for_log,
+    parse_llm_json_response,
+)
 from helpers.dirty_json import DirtyJson
 from agent import LoopData
 from helpers.log import LogItem
@@ -40,8 +43,6 @@ class MemorizeSolutions(Extension):
                 background=True,
             )
 
-            log_item.update(content=solutions_json)
-
             if not solutions_json or not isinstance(solutions_json, str):
                 log_item.update(heading="No response from utility model.")
                 return
@@ -55,7 +56,10 @@ class MemorizeSolutions(Extension):
             try:
                 solutions = parse_llm_json_response(solutions_json, DirtyJson.parse_string)
             except Exception as e:
-                log_item.update(heading=f"Failed to parse solutions response: {str(e)}")
+                log_item.update(
+                    heading=f"Failed to parse solutions response: {str(e)}",
+                    content=solutions_json,
+                )
                 return
 
             if solutions is None:
@@ -68,6 +72,8 @@ class MemorizeSolutions(Extension):
                 else:
                     log_item.update(heading="Invalid solutions format received.")
                     return
+
+            log_item.update(content=format_llm_json_for_log(solutions))
 
             if not isinstance(solutions, list) or len(solutions) == 0:
                 log_item.update(heading="No successful solutions to memorize.")
@@ -90,6 +96,7 @@ class MemorizeSolutions(Extension):
                     replace_similarity_threshold=replace_threshold,
                 )
 
+            memory_ids = []
             for solution in solutions:
                 if isinstance(solution, dict):
                     problem = solution.get("problem", "Unknown problem")
@@ -99,18 +106,22 @@ class MemorizeSolutions(Extension):
                     txt = f"# Solution\n {str(solution)}"
 
                 if use_consolidation:
-                    await consolidator.process_new_memory(
+                    result = await consolidator.process_new_memory(
                         new_memory=txt,
                         area=area,
                         metadata={"area": area},
                         log_item=log_item,
                     )
+                    memory_ids.extend(result.get("memory_ids", []))
                 else:
-                    await insert_with_simple_dedup(db, txt, area, replace_threshold)
+                    memory_id = await insert_with_simple_dedup(db, txt, area, replace_threshold)
+                    if memory_id:
+                        memory_ids.append(memory_id)
 
             log_item.update(
                 result=f"{len(solutions)} solutions memorized.",
                 heading=f"{len(solutions)} solutions memorized.",
+                memory_ids=memory_ids,
             )
 
         except Exception as e:

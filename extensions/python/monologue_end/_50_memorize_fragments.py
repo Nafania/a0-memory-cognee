@@ -1,7 +1,10 @@
 from helpers import plugins, errors
 from helpers.extension import Extension
 from usr.plugins.memory_cognee.helpers.memory import Memory, insert_with_simple_dedup
-from usr.plugins.memory_cognee.helpers.llm_json import parse_llm_json_response
+from usr.plugins.memory_cognee.helpers.llm_json import (
+    format_llm_json_for_log,
+    parse_llm_json_response,
+)
 from helpers.dirty_json import DirtyJson
 from agent import LoopData
 from helpers.log import LogItem
@@ -40,8 +43,6 @@ class MemorizeMemories(Extension):
                 background=True,
             )
 
-            log_item.update(content=memories_json)
-
             if not memories_json or not isinstance(memories_json, str):
                 log_item.update(heading="No response from utility model.")
                 return
@@ -55,7 +56,10 @@ class MemorizeMemories(Extension):
             try:
                 memories = parse_llm_json_response(memories_json, DirtyJson.parse_string)
             except Exception as e:
-                log_item.update(heading=f"Failed to parse memories response: {str(e)}")
+                log_item.update(
+                    heading=f"Failed to parse memories response: {str(e)}",
+                    content=memories_json,
+                )
                 return
 
             if memories is None:
@@ -68,6 +72,8 @@ class MemorizeMemories(Extension):
                 else:
                     log_item.update(heading="Invalid memories format received.")
                     return
+
+            log_item.update(content=format_llm_json_for_log(memories))
 
             if not isinstance(memories, list) or len(memories) == 0:
                 log_item.update(heading="No useful information to memorize.")
@@ -87,22 +93,28 @@ class MemorizeMemories(Extension):
                     similarity_threshold=cfg.get("memory_recall_similarity_threshold", 0.7),
                     replace_similarity_threshold=replace_threshold,
                 )
+                memory_ids = []
                 for memory in memories:
                     txt = f"{memory}"
-                    await consolidator.process_new_memory(
+                    result = await consolidator.process_new_memory(
                         new_memory=txt,
                         area=area,
                         metadata={"area": area},
                         log_item=log_item,
                     )
+                    memory_ids.extend(result.get("memory_ids", []))
             else:
+                memory_ids = []
                 for memory in memories:
                     txt = f"{memory}"
-                    await insert_with_simple_dedup(db, txt, area, replace_threshold)
+                    memory_id = await insert_with_simple_dedup(db, txt, area, replace_threshold)
+                    if memory_id:
+                        memory_ids.append(memory_id)
 
             log_item.update(
                 result=f"{len(memories)} entries memorized.",
                 heading=f"{len(memories)} entries memorized.",
+                memory_ids=memory_ids,
             )
 
         except Exception as e:
