@@ -117,7 +117,7 @@ class CogneeBackgroundWorker:
 
             self._running = True
             self._last_error = None
-            datasets = list(self._dirty_datasets)
+            datasets = sorted(self._dirty_datasets)
             dataset_versions = {
                 dataset: self._dirty_versions.get(dataset, 0)
                 for dataset in datasets
@@ -139,55 +139,66 @@ class CogneeBackgroundWorker:
             return
 
         try:
-            if config["temporal_enabled"]:
-                await cognee.cognify(datasets=datasets, temporal_cognify=True)
-            else:
-                await cognee.cognify(datasets=datasets, temporal_cognify=False)
+            failed_datasets: list[str] = []
+            for dataset in datasets:
+                try:
+                    if config["temporal_enabled"]:
+                        await cognee.cognify(datasets=[dataset], temporal_cognify=True)
+                    else:
+                        await cognee.cognify(datasets=[dataset], temporal_cognify=False)
 
-            PrintStyle.standard(f"Cognee cognify completed for datasets: {datasets}")
+                    PrintStyle.standard(f"Cognee cognify completed for dataset: {dataset}")
 
-            readiness_error = await _verify_cognify_ready(cognee, datasets)
-            if readiness_error:
-                raise RuntimeError(
-                    "Cognee cognify completed but "
-                    f"{readiness_error} for dataset(s): {datasets}"
-                )
+                    readiness_error = await _verify_cognify_ready(cognee, [dataset])
+                    if readiness_error:
+                        raise RuntimeError(
+                            "Cognee cognify completed but "
+                            f"{readiness_error} for dataset: {dataset}"
+                        )
 
-            if config["memify_enabled"]:
-                for dataset in datasets:
-                    try:
-                        await cognee.improve(dataset=dataset)
-                        PrintStyle.standard(f"Cognee improve completed for dataset: {dataset}")
-                    except Exception as e:
-                        if _is_empty_graph_improve_error(e):
-                            PrintStyle.warning(
-                                f"Cognee improve skipped for {dataset}: graph is empty"
+                    if config["memify_enabled"]:
+                        try:
+                            await cognee.improve(dataset=dataset)
+                            PrintStyle.standard(f"Cognee improve completed for dataset: {dataset}")
+                        except Exception as e:
+                            if _is_empty_graph_improve_error(e):
+                                PrintStyle.warning(
+                                    f"Cognee improve skipped for {dataset}: graph is empty"
+                                )
+                            else:
+                                raise
+
+                        readiness_error = await _verify_cognify_ready(cognee, [dataset])
+                        if readiness_error:
+                            raise RuntimeError(
+                                "Cognee improve completed but "
+                                f"{readiness_error} for dataset: {dataset}"
                             )
-                            continue
-                        PrintStyle.error(f"Cognee improve failed for {dataset}: {e}")
-                        with self._state_lock:
-                            self._last_error = str(e)
-
-                readiness_error = await _verify_cognify_ready(cognee, datasets)
-                if readiness_error:
-                    raise RuntimeError(
-                        "Cognee improve completed but "
-                        f"{readiness_error} for dataset(s): {datasets}"
-                    )
+                except Exception as e:
+                    failed_datasets.append(dataset)
+                    with self._state_lock:
+                        self._last_error = str(e)
+                    PrintStyle.error(f"Cognee pipeline failed for dataset {dataset}", str(e))
 
             with self._state_lock:
                 for dataset in datasets:
+                    if dataset in failed_datasets:
+                        continue
                     if self._dirty_versions.get(dataset, 0) == dataset_versions.get(dataset):
                         self._dirty_datasets.discard(dataset)
                         self._dirty_versions.pop(dataset, None)
 
-                if self._dirty_datasets:
+                if failed_datasets:
+                    should_reschedule = False
+                    self._last_run_success = False
+                elif self._dirty_datasets:
                     should_reschedule = True
+                    self._last_run_success = True
                 else:
                     should_reschedule = False
                     self._insert_count = 0
+                    self._last_run_success = True
                 self._last_cognify_time = time.monotonic()
-                self._last_run_success = True
         except Exception as e:
             with self._state_lock:
                 self._last_error = str(e)

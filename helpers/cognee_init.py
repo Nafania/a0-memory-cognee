@@ -836,12 +836,12 @@ def _purge_graph_db_if_unreadable(
             elif os.path.exists(sibling):
                 os.remove(sibling)
 
-        relative_path = os.path.relpath(graph_path, databases_dir)
-        marker = (
-            relative_path.split(os.sep, 1)[0]
-            if relative_path and relative_path != "."
-            else "__global_graph__"
-        )
+        if os.path.isfile(graph_path):
+            marker = os.path.splitext(os.path.basename(graph_path))[0]
+        else:
+            marker = os.path.basename(graph_path.rstrip(os.sep))
+        if not marker or marker in ("cognee_graph_kuzu", "cognee_graph_ladybug"):
+            marker = "__global_graph__"
         PrintStyle.warning(
             f"Purged unreadable stale graph DB (version_code={version_code}, "
             f"marker={marker}): {graph_path}"
@@ -867,21 +867,12 @@ def purge_unreadable_graph_db(graph_path: str) -> bool:
     return purged
 
 
-async def _reset_cognify_status_for_datasets(dataset_ids: set[str]) -> None:
-    """Reset cognify_pipeline status for ALL datasets (robust rebuild after purge).
-
-    We reset status for every dataset (not just those whose graph DB folder we
-    could identify), because:
-      1. Cognee's on-disk layout isn't documented as stable -- a purged folder
-         name may or may not map 1:1 to a dataset UUID.
-      2. After a major backend upgrade, it's safer to re-cognify everything
-         than to silently leave some datasets with a stale graph.
-      3. Data in SQLite + LanceDB is unchanged, so re-cognify is idempotent
-         and non-destructive.
-
-    Also marks every dataset as dirty so the background worker picks them up
-    without waiting for a new insert.
-    """
+async def _reset_cognify_status_for_datasets(
+    dataset_ids: set[str],
+    *,
+    reset_all: bool = False,
+) -> None:
+    """Reset cognify_pipeline status and mark only affected datasets dirty."""
     if not dataset_ids:
         return
     try:
@@ -902,13 +893,22 @@ async def _reset_cognify_status_for_datasets(dataset_ids: set[str]) -> None:
         )
         return
 
-    reset_count = 0
+    requested_ids = {str(dataset_id) for dataset_id in dataset_ids}
     dataset_names: list[str] = []
     dataset_id_values = []
     for ds in all_datasets:
+        dataset_id = str(getattr(ds, "id", "") or "")
+        if not reset_all and dataset_id not in requested_ids:
+            continue
         dataset_id_values.append(ds.id)
         if getattr(ds, "name", None):
             dataset_names.append(ds.name)
+
+    if not dataset_id_values:
+        PrintStyle.warning(
+            f"No Cognee datasets matched reset request: {sorted(requested_ids)}"
+        )
+        return
 
     reset_count = await _delete_pipeline_runs_for_dataset_ids(dataset_id_values)
 
@@ -970,7 +970,7 @@ async def reset_cognify_status_for_dataset_names(dataset_names: list[str]) -> li
 
 async def reset_cognify_status_for_all_datasets() -> None:
     """Reset cognify_pipeline status for every dataset and mark them dirty."""
-    await _reset_cognify_status_for_datasets({"manual_reindex"})
+    await _reset_cognify_status_for_datasets({"manual_reindex"}, reset_all=True)
 
 
 async def _delete_pipeline_runs_for_dataset_ids(dataset_ids: list) -> int:

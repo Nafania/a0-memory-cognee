@@ -381,6 +381,40 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
 
         self.assertEqual(unready, {dataset_id})
 
+    def test_reset_cognify_status_targets_only_affected_dataset_ids(self):
+        cognee_init = _load_cognee_init_module()
+
+        affected_id = "00afc710-2c0c-5d61-957e-c452672842ae"
+        clean_id = "eba921c6-3310-528d-8dca-0ec58cfe603b"
+        fake_cognee = types.ModuleType("cognee")
+
+        class Datasets:
+            async def list_datasets(self):
+                return [
+                    types.SimpleNamespace(id=affected_id, name="default"),
+                    types.SimpleNamespace(id=clean_id, name="projects_alpha"),
+                ]
+
+        fake_cognee.datasets = Datasets()
+        deleted_ids = []
+
+        async def delete_pipeline_runs(dataset_ids):
+            deleted_ids.extend(str(dataset_id) for dataset_id in dataset_ids)
+            return len(dataset_ids)
+
+        cognee_init._delete_pipeline_runs_for_dataset_ids = delete_pipeline_runs
+        old_cognee = sys.modules.get("cognee")
+        sys.modules["cognee"] = fake_cognee
+        try:
+            asyncio.run(cognee_init._reset_cognify_status_for_datasets({affected_id}))
+        finally:
+            if old_cognee is None:
+                sys.modules.pop("cognee", None)
+            else:
+                sys.modules["cognee"] = old_cognee
+
+        self.assertEqual(deleted_ids, [affected_id])
+
     def test_patches_lancedb_migration_defaults_for_source_fields(self):
         cognee_init = _load_cognee_init_module()
 

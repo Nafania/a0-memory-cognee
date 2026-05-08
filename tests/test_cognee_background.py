@@ -232,6 +232,43 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertTrue(status["last_run_success"])
         self.assertEqual(status["dirty_datasets"], ["default"])
 
+    def test_multiple_dirty_datasets_are_cognified_one_at_a_time(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [
+                    types.SimpleNamespace(id="default-id", name="default"),
+                    types.SimpleNamespace(id="project-id", name="projects_alpha"),
+                ]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id=f"data-{dataset_id}")]
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = FakeDatasets()
+        cognify_calls = []
+
+        async def cognify(*, datasets, temporal_cognify):
+            cognify_calls.append(list(datasets))
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        worker.mark_dirty("default")
+        worker.mark_dirty("projects_alpha")
+
+        asyncio.run(worker.run_pipeline())
+
+        self.assertEqual(cognify_calls, [["default"], ["projects_alpha"]])
+        status = worker.get_status()
+        self.assertTrue(status["last_run_success"])
+        self.assertEqual(status["dirty_datasets"], [])
+
     def test_empty_search_can_nudge_rebuild_before_first_successful_run(self):
         fake_cognee = types.ModuleType("cognee")
         background = _load_background_module(fake_cognee)
