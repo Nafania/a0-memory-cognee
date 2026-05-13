@@ -118,10 +118,6 @@ async def read_dataset_graphs(
                 )
             )
         except Exception as e:
-            error = str(e)
-            if repair_unreadable and _is_unreadable_ladybug_error(e):
-                await _repair_unreadable_dataset_graph(dataset, dataset_name)
-                error = f"{error}; graph DB was purged and scheduled for rebuild"
             results.append(
                 DatasetGraph(
                     dataset_id=dataset_id,
@@ -129,7 +125,7 @@ async def read_dataset_graphs(
                     data_count=data_count,
                     nodes=[],
                     edges=[],
-                    error=error,
+                    error=str(e),
                 )
             )
 
@@ -177,48 +173,4 @@ async def _resolve_dataset_owner_id(dataset: Any) -> Any:
 
     default_user = await get_default_user()
     return default_user.id
-
-
-def _is_unreadable_ladybug_error(error: Exception) -> bool:
-    message = str(error).lower()
-    return (
-        "could not map version_code" in message
-        or "failed to initialize ladybug database" in message
-    )
-
-
-async def _repair_unreadable_dataset_graph(dataset: Any, dataset_name: str) -> None:
-    try:
-        from cognee.context_global_variables import graph_db_config
-
-        graph_config = graph_db_config.get() or {}
-        graph_path = graph_config.get("graph_file_path")
-        if not graph_path:
-            return
-
-        await _purge_and_schedule_dataset_graph(graph_path, dataset_name)
-    except Exception as e:
-        PrintStyle.warning(
-            f"Could not repair unreadable dataset graph ({dataset_name}): {e}"
-        )
-
-
-async def _purge_and_schedule_dataset_graph(graph_path: str, dataset_name: str) -> bool:
-    from . import cognee_init
-
-    purged = cognee_init.purge_unreadable_graph_db(graph_path)
-    if not purged:
-        return False
-
-    reset = await cognee_init.reset_cognify_status_for_dataset_names([dataset_name])
-    try:
-        from .cognee_background import CogneeBackgroundWorker
-
-        for name in reset or [dataset_name]:
-            CogneeBackgroundWorker.get_instance().mark_dirty(name)
-    except Exception as e:
-        PrintStyle.warning(
-            f"Could not mark repaired dataset graph dirty ({dataset_name}): {e}"
-        )
-    return True
 

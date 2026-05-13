@@ -68,13 +68,6 @@ def _load_cognee_init_module():
     return module
 
 
-def _write_catalog(graph_dir: Path, version_code: int) -> None:
-    graph_dir.mkdir(parents=True)
-    with (graph_dir / "catalog.kz").open("wb") as f:
-        f.write(b"KUZ\x00")
-        f.write(struct.pack("<Q", version_code))
-
-
 def _write_graph_file(graph_file: Path, version_code: int, magic: bytes = b"KUZ\x00") -> None:
     graph_file.parent.mkdir(parents=True, exist_ok=True)
     with graph_file.open("wb") as f:
@@ -82,19 +75,7 @@ def _write_graph_file(graph_file: Path, version_code: int, magic: bytes = b"KUZ\
         f.write(struct.pack("<Q", version_code))
 
 
-def _run_purge_with_system_root(cognee_init, system_root: Path) -> set[str]:
-    old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
-    os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
-    try:
-        return cognee_init._purge_stale_graph_dbs()
-    finally:
-        if old_system_root is None:
-            os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
-        else:
-            os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
-
-
-class StaleGraphDbPurgeTest(unittest.TestCase):
+class CogneeInitStartupTest(unittest.TestCase):
     def tearDown(self):
         for name in list(sys.modules):
             if name.startswith("cognee.infrastructure.databases.vector.lancedb"):
@@ -256,79 +237,6 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
                 )
             )
 
-    def test_detects_dataset_with_data_but_missing_graph_file(self):
-        cognee_init = _load_cognee_init_module()
-
-        dataset_id = "00afc710-2c0c-5d61-957e-c452672842ae"
-        fake_cognee = types.ModuleType("cognee")
-
-        class Datasets:
-            async def list_datasets(self):
-                return [types.SimpleNamespace(id=dataset_id, name="default")]
-
-            async def list_data(self, ds_id):
-                return [types.SimpleNamespace(id="data-1")]
-
-        fake_cognee.datasets = Datasets()
-        old_cognee = sys.modules.get("cognee")
-        sys.modules["cognee"] = fake_cognee
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            (system_root / "databases").mkdir(parents=True)
-            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
-            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
-            try:
-                missing = asyncio.run(cognee_init._detect_datasets_missing_graphs())
-            finally:
-                if old_system_root is None:
-                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
-                else:
-                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
-                if old_cognee is None:
-                    sys.modules.pop("cognee", None)
-                else:
-                    sys.modules["cognee"] = old_cognee
-
-        self.assertEqual(missing, {dataset_id})
-
-    def test_does_not_mark_dataset_missing_when_graph_file_exists(self):
-        cognee_init = _load_cognee_init_module()
-
-        dataset_id = "00afc710-2c0c-5d61-957e-c452672842ae"
-        fake_cognee = types.ModuleType("cognee")
-
-        class Datasets:
-            async def list_datasets(self):
-                return [types.SimpleNamespace(id=dataset_id, name="default")]
-
-            async def list_data(self, ds_id):
-                return [types.SimpleNamespace(id="data-1")]
-
-        fake_cognee.datasets = Datasets()
-        old_cognee = sys.modules.get("cognee")
-        sys.modules["cognee"] = fake_cognee
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            graph_file = system_root / "databases" / "owner-1" / f"{dataset_id}.pkl"
-            _write_graph_file(graph_file, 40, magic=b"LBUG")
-            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
-            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
-            try:
-                missing = asyncio.run(cognee_init._detect_datasets_missing_graphs())
-            finally:
-                if old_system_root is None:
-                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
-                else:
-                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
-                if old_cognee is None:
-                    sys.modules.pop("cognee", None)
-                else:
-                    sys.modules["cognee"] = old_cognee
-
-        self.assertFalse(missing)
-
     def test_detects_dataset_with_data_but_empty_graph(self):
         cognee_init = _load_cognee_init_module()
 
@@ -454,162 +362,7 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
         self.assertEqual(defaults["metadata"], {})
         self.assertEqual(defaults["text"], "")
 
-    def test_purges_stale_graph_dirs_without_pkl_suffix(self):
-        cognee_init = _load_cognee_init_module()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            databases_dir = system_root / "databases"
-
-            global_legacy_graph = databases_dir / "cognee_graph_kuzu"
-            nested_legacy_graph = databases_dir / "owner-1" / "cognee_graph_ladybug"
-            valid_graph = databases_dir / "owner-2" / "valid_graph"
-
-            _write_catalog(global_legacy_graph, 999)
-            _write_catalog(nested_legacy_graph, 999)
-            _write_catalog(valid_graph, 40)
-
-            original = cognee_init._is_graph_readable_by_current_ladybug
-            cognee_init._is_graph_readable_by_current_ladybug = (
-                lambda path: os.path.abspath(path) == os.path.abspath(valid_graph)
-            )
-            try:
-                affected = _run_purge_with_system_root(cognee_init, system_root)
-            finally:
-                cognee_init._is_graph_readable_by_current_ladybug = original
-
-            self.assertTrue(affected)
-            self.assertFalse(global_legacy_graph.exists())
-            self.assertFalse(nested_legacy_graph.exists())
-            self.assertTrue(valid_graph.exists())
-
-    def test_purges_stale_file_based_graph_dbs(self):
-        cognee_init = _load_cognee_init_module()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            databases_dir = system_root / "databases"
-
-            stale_graph_file = databases_dir / "cognee_graph_kuzu"
-            valid_graph_file = databases_dir / "valid_graph_kuzu"
-            _write_graph_file(stale_graph_file, 999)
-            _write_graph_file(valid_graph_file, 40)
-            (Path(str(stale_graph_file) + ".wal")).write_text("wal")
-            (Path(str(stale_graph_file) + ".lock")).write_text("lock")
-
-            original = cognee_init._is_graph_readable_by_current_ladybug
-            cognee_init._is_graph_readable_by_current_ladybug = (
-                lambda path: os.path.abspath(path) == os.path.abspath(valid_graph_file)
-            )
-            try:
-                affected = _run_purge_with_system_root(cognee_init, system_root)
-            finally:
-                cognee_init._is_graph_readable_by_current_ladybug = original
-
-            self.assertTrue(affected)
-            self.assertFalse(stale_graph_file.exists())
-            self.assertFalse(Path(str(stale_graph_file) + ".wal").exists())
-            self.assertFalse(Path(str(stale_graph_file) + ".lock").exists())
-            self.assertTrue(valid_graph_file.exists())
-
-    def test_startup_purge_does_not_delete_dataset_scoped_pkl_from_probe_alone(self):
-        cognee_init = _load_cognee_init_module()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            graph_file = (
-                system_root
-                / "databases"
-                / "owner-1"
-                / "48287602-4f24-5feb-a495-6cdf50bb0e1d.pkl"
-            )
-            _write_graph_file(graph_file, 40)
-
-            original = cognee_init._is_graph_readable_by_current_ladybug
-            cognee_init._is_graph_readable_by_current_ladybug = lambda path: False
-            try:
-                affected = _run_purge_with_system_root(cognee_init, system_root)
-            finally:
-                cognee_init._is_graph_readable_by_current_ladybug = original
-
-            self.assertFalse(affected)
-            self.assertTrue(graph_file.exists())
-
-    def test_forced_dataset_purge_deletes_unreadable_pkl_after_cognee_read_failure(self):
-        cognee_init = _load_cognee_init_module()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            graph_file = (
-                system_root
-                / "databases"
-                / "owner-1"
-                / "48287602-4f24-5feb-a495-6cdf50bb0e1d.pkl"
-            )
-            _write_graph_file(graph_file, 40)
-
-            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
-            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
-            original = cognee_init._is_graph_readable_by_current_ladybug
-            cognee_init._is_graph_readable_by_current_ladybug = lambda path: False
-            try:
-                purged = cognee_init.purge_unreadable_graph_db(str(graph_file))
-            finally:
-                cognee_init._is_graph_readable_by_current_ladybug = original
-                if old_system_root is None:
-                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
-                else:
-                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
-
-            self.assertTrue(purged)
-            self.assertFalse(graph_file.exists())
-
-    def test_purges_unreadable_legacy_graph_even_if_cognee_knows_version_code(self):
-        cognee_init = _load_cognee_init_module()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            graph_file = system_root / "databases" / "cognee_graph_kuzu"
-            _write_graph_file(graph_file, 39)
-
-            affected = _run_purge_with_system_root(cognee_init, system_root)
-
-            self.assertTrue(affected)
-            self.assertFalse(graph_file.exists())
-
-    def test_keeps_unknown_version_graph_if_current_ladybug_can_open_it(self):
-        cognee_init = _load_cognee_init_module()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            databases_dir = system_root / "databases"
-            current_graph = databases_dir / "cognee_graph_ladybug"
-            _write_catalog(current_graph, 999)
-
-            original = cognee_init._is_graph_readable_by_current_ladybug
-            cognee_init._is_graph_readable_by_current_ladybug = lambda path: True
-            try:
-                affected = _run_purge_with_system_root(cognee_init, system_root)
-            finally:
-                cognee_init._is_graph_readable_by_current_ladybug = original
-
-            self.assertFalse(affected)
-            self.assertTrue(current_graph.exists())
-
-    def test_purges_unreadable_graph_even_when_version_matches_current_ladybug(self):
-        cognee_init = _load_cognee_init_module()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            graph_file = system_root / "databases" / "cognee_graph_ladybug"
-            _write_graph_file(graph_file, 40, magic=b"LBUG")
-
-            affected = _run_purge_with_system_root(cognee_init, system_root)
-
-            self.assertTrue(affected)
-            self.assertFalse(graph_file.exists())
-
-    def test_purges_unreadable_lbug_file_with_unknown_non_current_version(self):
+    def test_startup_does_not_purge_ladybug_graph_files(self):
         cognee_init = _load_cognee_init_module()
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -617,52 +370,49 @@ class StaleGraphDbPurgeTest(unittest.TestCase):
             graph_file = system_root / "databases" / "cognee_graph_ladybug"
             _write_graph_file(graph_file, 999, magic=b"LBUG")
 
-            affected = _run_purge_with_system_root(cognee_init, system_root)
+            run_migrations_module = types.ModuleType("cognee.run_migrations")
 
-            self.assertTrue(affected)
-            self.assertFalse(graph_file.exists())
+            async def run_startup_migrations():
+                return None
 
-    def test_keeps_current_lbug_file_graph_if_current_ladybug_can_open_it(self):
-        cognee_init = _load_cognee_init_module()
+            run_migrations_module.run_startup_migrations = run_startup_migrations
+            old_run_migrations = sys.modules.get("cognee.run_migrations")
+            sys.modules["cognee.run_migrations"] = run_migrations_module
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            graph_file = system_root / "databases" / "cognee_graph_ladybug"
-            _write_graph_file(graph_file, 40, magic=b"LBUG")
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            original_lancedb = cognee_init._patch_lancedb_migration_defaults
+            original_sync = cognee_init._sync_missing_columns
+            original_rewrite = cognee_init._rewrite_legacy_data_storage_locations
+            original_quarantine = cognee_init._quarantine_missing_data_files
+            original_unready = cognee_init._detect_datasets_with_unready_graphs
 
-            original = cognee_init._is_graph_readable_by_current_ladybug
-            cognee_init._is_graph_readable_by_current_ladybug = lambda path: True
+            async def no_datasets():
+                return set()
+
+            cognee_init._patch_lancedb_migration_defaults = lambda: None
+            cognee_init._sync_missing_columns = lambda: None
+            cognee_init._rewrite_legacy_data_storage_locations = lambda: None
+            cognee_init._quarantine_missing_data_files = lambda: None
+            cognee_init._detect_datasets_with_unready_graphs = no_datasets
             try:
-                affected = _run_purge_with_system_root(cognee_init, system_root)
+                asyncio.run(cognee_init._create_db_tables())
             finally:
-                cognee_init._is_graph_readable_by_current_ladybug = original
+                cognee_init._patch_lancedb_migration_defaults = original_lancedb
+                cognee_init._sync_missing_columns = original_sync
+                cognee_init._rewrite_legacy_data_storage_locations = original_rewrite
+                cognee_init._quarantine_missing_data_files = original_quarantine
+                cognee_init._detect_datasets_with_unready_graphs = original_unready
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+                if old_run_migrations is None:
+                    sys.modules.pop("cognee.run_migrations", None)
+                else:
+                    sys.modules["cognee.run_migrations"] = old_run_migrations
 
-            self.assertFalse(affected)
             self.assertTrue(graph_file.exists())
-
-    def test_keeps_real_current_ladybug_graph_file(self):
-        try:
-            import ladybug
-        except Exception as exc:
-            self.skipTest(f"ladybug not installed: {exc}")
-
-        cognee_init = _load_cognee_init_module()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            system_root = Path(tmp_dir) / "cognee_system"
-            graph_file = system_root / "databases" / "cognee_graph_ladybug"
-            graph_file.parent.mkdir(parents=True, exist_ok=True)
-            db = ladybug.Database(str(graph_file))
-            db.init_database()
-            close = getattr(db, "close", None)
-            if callable(close):
-                close()
-
-            affected = _run_purge_with_system_root(cognee_init, system_root)
-
-            self.assertFalse(affected)
-            self.assertTrue(graph_file.exists())
-
 
 if __name__ == "__main__":
     unittest.main()
