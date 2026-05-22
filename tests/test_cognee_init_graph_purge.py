@@ -237,6 +237,56 @@ class CogneeInitStartupTest(unittest.TestCase):
                 )
             )
 
+    def test_schema_sync_disposes_sqlalchemy_engine(self):
+        cognee_init = _load_cognee_init_module()
+
+        fake_engine = types.SimpleNamespace(
+            dialect=types.SimpleNamespace(name="sqlite"),
+            disposed=False,
+        )
+        fake_engine.dispose = lambda: setattr(fake_engine, "disposed", True)
+
+        sqlalchemy = types.ModuleType("sqlalchemy")
+        sqlalchemy.create_engine = lambda *args, **kwargs: fake_engine
+        sqlalchemy.inspect = lambda engine: types.SimpleNamespace()
+        sqlalchemy.text = lambda ddl: ddl
+
+        model_base = types.ModuleType("cognee.infrastructure.databases.relational.ModelBase")
+        model_base.Base = types.SimpleNamespace(
+            metadata=types.SimpleNamespace(tables={})
+        )
+
+        old_modules = {
+            name: sys.modules.get(name)
+            for name in (
+                "sqlalchemy",
+                "cognee.infrastructure.databases.relational.ModelBase",
+            )
+        }
+        sys.modules["sqlalchemy"] = sqlalchemy
+        sys.modules["cognee.infrastructure.databases.relational.ModelBase"] = model_base
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            system_root = tmp / "cognee_system"
+            db_dir = system_root / "databases"
+            db_dir.mkdir(parents=True)
+            (db_dir / "cognee_db").touch()
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            os.environ["DB_NAME"] = "cognee_db"
+            try:
+                cognee_init._sync_missing_columns()
+            finally:
+                os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                os.environ.pop("DB_NAME", None)
+                for name, old_module in old_modules.items():
+                    if old_module is None:
+                        sys.modules.pop(name, None)
+                    else:
+                        sys.modules[name] = old_module
+
+        self.assertTrue(fake_engine.disposed)
+
     def test_detects_dataset_with_data_but_empty_graph(self):
         cognee_init = _load_cognee_init_module()
 

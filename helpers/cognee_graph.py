@@ -19,22 +19,6 @@ class DatasetGraph:
     error: str | None = None
 
 
-def clear_cognee_graph_engine_cache() -> None:
-    """Force graph reads to instantiate an engine for the current dataset context."""
-    try:
-        import importlib
-
-        graph_module = importlib.import_module(
-            "cognee.infrastructure.databases.graph.get_graph_engine"
-        )
-        cached_factory = getattr(graph_module, "_create_graph_engine", None)
-        cache_clear = getattr(cached_factory, "cache_clear", None)
-        if callable(cache_clear):
-            cache_clear()
-    except Exception as e:
-        PrintStyle.warning(f"Could not clear Cognee graph engine cache: {e}")
-
-
 async def read_dataset_graphs(
     cognee: Any,
     dataset_names: list[str] | None = None,
@@ -154,9 +138,7 @@ async def _read_single_dataset_graph(
     from cognee.infrastructure.databases.graph import get_graph_engine
 
     owner_id = await _resolve_dataset_owner_id(dataset)
-    clear_cognee_graph_engine_cache()
     async with set_database_global_context_variables(dataset.id, owner_id):
-        clear_cognee_graph_engine_cache()
         graph_engine = await get_graph_engine()
         if await graph_engine.is_empty():
             return [], [], True
@@ -173,4 +155,3 @@ async def _resolve_dataset_owner_id(dataset: Any) -> Any:
 
     default_user = await get_default_user()
     return default_user.id
-

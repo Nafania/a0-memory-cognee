@@ -806,28 +806,35 @@ def _sync_missing_columns():
         )
         if not os.path.exists(db_path):
             return
-        engine = create_engine(f"sqlite:///{db_path}")
-        inspector = sa_inspect(engine)
+        engine = None
+        try:
+            engine = create_engine(f"sqlite:///{db_path}")
+            inspector = sa_inspect(engine)
 
-        for table_name, table_obj in Base.metadata.tables.items():
-            if not inspector.has_table(table_name):
-                continue
-            existing = {c["name"] for c in inspector.get_columns(table_name)}
-            for col in table_obj.columns:
-                if col.name in existing:
+            for table_name, table_obj in Base.metadata.tables.items():
+                if not inspector.has_table(table_name):
                     continue
-                col_type = col.type.compile(dialect=engine.dialect)
-                parts = [f"ALTER TABLE [{table_name}] ADD COLUMN [{col.name}] {col_type}"]
-                if not col.nullable:
-                    parts.append("NOT NULL")
-                if col.server_default is not None:
-                    parts.append(f"DEFAULT {col.server_default.arg}")
-                elif col.nullable:
-                    parts.append("DEFAULT NULL")
-                ddl = " ".join(parts)
-                with engine.begin() as conn:
-                    conn.execute(text(ddl))
-                PrintStyle.standard(f"Schema sync: added {table_name}.{col.name} ({col_type})")
+                existing = {c["name"] for c in inspector.get_columns(table_name)}
+                for col in table_obj.columns:
+                    if col.name in existing:
+                        continue
+                    col_type = col.type.compile(dialect=engine.dialect)
+                    parts = [f"ALTER TABLE [{table_name}] ADD COLUMN [{col.name}] {col_type}"]
+                    if not col.nullable:
+                        parts.append("NOT NULL")
+                    if col.server_default is not None:
+                        parts.append(f"DEFAULT {col.server_default.arg}")
+                    elif col.nullable:
+                        parts.append("DEFAULT NULL")
+                    ddl = " ".join(parts)
+                    with engine.begin() as conn:
+                        conn.execute(text(ddl))
+                    PrintStyle.standard(f"Schema sync: added {table_name}.{col.name} ({col_type})")
+        finally:
+            if engine is not None:
+                dispose = getattr(engine, "dispose", None)
+                if callable(dispose):
+                    dispose()
     except Exception as e:
         PrintStyle.error(f"Schema column sync failed: {e}")
 

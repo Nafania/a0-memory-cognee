@@ -504,7 +504,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertTrue(status["last_run_success"])
         self.assertEqual(status["dirty_datasets"], [])
 
-    def test_stale_graph_engine_cache_is_cleared_before_readiness(self):
+    def test_readiness_does_not_clear_graph_engine_cache(self):
         class FakeDatasets:
             async def list_datasets(self):
                 return [types.SimpleNamespace(id="dataset-id", name="default")]
@@ -528,24 +528,15 @@ class CogneeBackgroundTest(unittest.TestCase):
         background = _load_background_module(fake_cognee)
         cache_cleared = {"value": False}
 
-        class StaleGraphEngine:
-            async def is_empty(self):
-                return False
-
-            async def get_graph_data(self):
-                return [("stale-node", {"name": "stale"})], []
-
-        class FreshGraphEngine:
-            async def is_empty(self):
-                return True
-
-            async def get_graph_data(self):
-                return [], []
-
         async def get_graph_engine():
-            if cache_cleared["value"]:
-                return FreshGraphEngine()
-            return StaleGraphEngine()
+            class FakeGraphEngine:
+                async def is_empty(self):
+                    return False
+
+                async def get_graph_data(self):
+                    return [("node-id", {"name": "node"})], []
+
+            return FakeGraphEngine()
 
         def _create_graph_engine():
             return None
@@ -568,10 +559,10 @@ class CogneeBackgroundTest(unittest.TestCase):
         asyncio.run(worker.run_pipeline())
 
         status = worker.get_status()
-        self.assertTrue(cache_cleared["value"])
-        self.assertFalse(status["last_run_success"])
-        self.assertEqual(status["dirty_datasets"], ["default"])
-        self.assertIn("graph is still empty", status["last_error"])
+        self.assertFalse(cache_cleared["value"])
+        self.assertTrue(status["last_run_success"])
+        self.assertEqual(status["dirty_datasets"], [])
+        self.assertIsNone(status["last_error"])
 
     def test_empty_graph_with_unknown_dataset_data_keeps_dataset_dirty(self):
         class FakeDatasets:

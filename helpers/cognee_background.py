@@ -391,19 +391,3 @@ async def _get_dataset_data_count(cognee, dataset_name: str) -> int | None:
             f"Could not list Cognee data for readiness check ({dataset_name}): {e}"
         )
         return None
-
-
-def _clear_cognee_graph_engine_cache() -> None:
-    """Force readiness checks to read persisted graph state, not a stale adapter."""
-    try:
-        import importlib
-
-        graph_module = importlib.import_module(
-            "cognee.infrastructure.databases.graph.get_graph_engine"
-        )
-        cached_factory = getattr(graph_module, "_create_graph_engine", None)
-        cache_clear = getattr(cached_factory, "cache_clear", None)
-        if callable(cache_clear):
-            cache_clear()
-    except Exception as e:
-        PrintStyle.warning(f"Could not clear Cognee graph engine cache: {e}")
