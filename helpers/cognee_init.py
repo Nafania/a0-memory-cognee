@@ -97,11 +97,6 @@ def _configure_cognee_logging() -> None:
         logging.getLogger(logger_name).setLevel(level)
 
 
-def _configure_cognee_connection_checks() -> None:
-    """Agent Zero owns model config; Cognee's probe breaks on account-backed proxies."""
-    os.environ.setdefault("COGNEE_SKIP_CONNECTION_TEST", "true")
-
-
 def _map_provider(a0_provider: str) -> str:
     return _PROVIDER_MAP.get(a0_provider.lower(), a0_provider)
 
@@ -193,7 +188,6 @@ def configure_cognee() -> None:
 
     dotenv.load_dotenv()
     _configure_cognee_logging()
-    _configure_cognee_connection_checks()
     settings = get_settings()
 
     # --- Storage directories (MUST be set BEFORE import cognee) ---
