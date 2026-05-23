@@ -111,6 +111,7 @@ class Memory:
     def __init__(self, dataset_name: str, memory_subdir: str):
         self.dataset_name = dataset_name
         self.memory_subdir = memory_subdir
+        self._last_insert_errors: list[str] = []
 
     def get_search_datasets(self) -> list[str]:
         """Always search in 'default' + current project dataset (if any)."""
@@ -342,11 +343,14 @@ class Memory:
         if not ids:
             preview = (text or "")[:120].replace("\n", " ")
             area = metadata.get("area", Memory.Area.MAIN.value) if metadata else Memory.Area.MAIN.value
+            error_detail = ""
+            if self._last_insert_errors:
+                error_detail = f" Last insert error: {self._last_insert_errors[-1]}."
             raise RuntimeError(
                 "Memory.insert_text: cognee.add returned no IDs "
                 f"(dataset={self.dataset_name!r}, area={area!r}, "
                 f"text_len={len(text)}, metadata_keys={list(metadata.keys()) if metadata else []}, "
-                f"preview={preview!r}). "
+                f"preview={preview!r}).{error_detail} "
                 "See prior 'Cognee insert failed' log lines for the underlying exception."
             )
         return ids[0]
@@ -354,6 +358,7 @@ class Memory:
     async def insert_documents(self, docs: list[Document]) -> list[str]:
         cognee, _ = _get_cognee()
         ids = []
+        insert_errors: list[str] = []
         from .cognee_background import CogneeBackgroundWorker
 
         for doc in docs:
@@ -371,13 +376,16 @@ class Memory:
                 ids.append(content_id)
                 CogneeBackgroundWorker.get_instance().mark_dirty(self.dataset_name)
             except Exception as e:
+                error = f"{type(e).__name__}: {e}"
+                insert_errors.append(error)
                 preview = (doc.page_content or "")[:120].replace("\n", " ")
                 PrintStyle.error(
-                    f"Cognee insert failed: {type(e).__name__}: {e} "
+                    f"Cognee insert failed: {error} "
                     f"(dataset={self.dataset_name!r}, area={area!r}, "
                     f"text_len={len(doc.page_content)}, preview={preview!r})"
                 )
 
+        self._last_insert_errors = insert_errors
         _invalidate_dashboard_cache()
         return ids
 

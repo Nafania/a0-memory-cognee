@@ -97,7 +97,14 @@ class CogneeBackgroundWorker:
         if pending:
             return f"Cognee memory graph rebuild pending for dataset(s): {pending}"
         if failed:
-            return f"Cognee memory graph rebuild failed for dataset(s): {failed}"
+            failure_reasons = []
+            with self._state_lock:
+                for dataset in failed[:3]:
+                    reason = self._dataset_readiness.get(dataset, {}).get("reason")
+                    if reason:
+                        failure_reasons.append(f"{dataset}: {reason}")
+            detail = f". Reason: {'; '.join(failure_reasons)}" if failure_reasons else ""
+            return f"Cognee memory graph rebuild failed for dataset(s): {failed}{detail}"
         return None
 
     def _set_dataset_state_locked(

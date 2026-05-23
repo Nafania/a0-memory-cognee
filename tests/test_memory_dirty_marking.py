@@ -226,6 +226,29 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
             self.assertEqual(len(fake_cognee.search_calls), 1)
             self.assertIs(fake_cognee.search_calls[0]["verbose"], True)
 
+    def test_insert_text_reports_underlying_cognee_add_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+
+            class FakeCognee:
+                async def add(self, *args, **kwargs):
+                    raise ValueError("structured output probe returned testtest")
+
+            memory_module._get_cognee = lambda: (FakeCognee(), None)
+
+            memory = memory_module.Memory("default", "default")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Last insert error: ValueError: structured output probe returned testtest",
+            ):
+                asyncio.run(
+                    memory.insert_text(
+                        "new memory",
+                        {"area": "fragments", "timestamp": "now"},
+                    )
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

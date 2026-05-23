@@ -67,8 +67,10 @@ class CogneeTemporalPromptTest(unittest.TestCase):
     def setUp(self):
         self.old_prompt = os.environ.get("TEMPORAL_GRAPH_PROMPT_PATH")
         self.old_log_level = os.environ.get("LOG_LEVEL")
+        self.old_skip_connection_test = os.environ.get("COGNEE_SKIP_CONNECTION_TEST")
         os.environ.pop("TEMPORAL_GRAPH_PROMPT_PATH", None)
         os.environ.pop("LOG_LEVEL", None)
+        os.environ.pop("COGNEE_SKIP_CONNECTION_TEST", None)
 
     def tearDown(self):
         if self.old_prompt is None:
@@ -79,6 +81,10 @@ class CogneeTemporalPromptTest(unittest.TestCase):
             os.environ.pop("LOG_LEVEL", None)
         else:
             os.environ["LOG_LEVEL"] = self.old_log_level
+        if self.old_skip_connection_test is None:
+            os.environ.pop("COGNEE_SKIP_CONNECTION_TEST", None)
+        else:
+            os.environ["COGNEE_SKIP_CONNECTION_TEST"] = self.old_skip_connection_test
 
     def test_configures_temporal_prompt_matching_event_list_schema(self):
         cognee_init = _load_cognee_init_module()
@@ -123,6 +129,21 @@ class CogneeTemporalPromptTest(unittest.TestCase):
         cognee_init._configure_cognee_logging()
 
         self.assertEqual(os.environ["LOG_LEVEL"], "DEBUG")
+
+    def test_skips_cognee_connection_probe_by_default(self):
+        cognee_init = _load_cognee_init_module()
+
+        cognee_init._configure_cognee_connection_checks()
+
+        self.assertEqual(os.environ["COGNEE_SKIP_CONNECTION_TEST"], "true")
+
+    def test_keeps_user_configured_connection_probe_setting(self):
+        os.environ["COGNEE_SKIP_CONNECTION_TEST"] = "false"
+        cognee_init = _load_cognee_init_module()
+
+        cognee_init._configure_cognee_connection_checks()
+
+        self.assertEqual(os.environ["COGNEE_SKIP_CONNECTION_TEST"], "false")
 
 
 if __name__ == "__main__":
