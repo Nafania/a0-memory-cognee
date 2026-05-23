@@ -38,28 +38,9 @@ def install():
         from helpers.print_style import PrintStyle
         PrintStyle.warning(f"Could not auto-disable _memory: {e}. Please disable manually in Settings > Plugins.")
 
-    # 3. Initialize Cognee DB and migrate FAISS in a fresh Python process.
+    # 3. Do not import/initialize Cognee from the install hook.
     #
-    # pip may upgrade core libraries already imported by Agent Zero (notably
-    # pydantic). Importing Cognee/LanceDB in this same process can mix old
-    # in-memory modules with newly installed files. A subprocess sees a coherent
-    # post-install environment.
-    subprocess.check_call([
-        sys.executable,
-        "-c",
-        """
-from helpers.print_style import PrintStyle
-
-try:
-    from usr.plugins.memory_cognee.helpers.cognee_init import ensure_tables_sync
-    ensure_tables_sync()
-except Exception as e:
-    PrintStyle.warning(f"Cognee DB init during install: {e}")
-
-try:
-    from usr.plugins.memory_cognee.helpers.faiss_migration import migrate
-    migrate()
-except Exception as e:
-    PrintStyle.warning(f"FAISS migration skipped: {e}")
-""",
-    ])
+    # Agent Zero also runs this hook while restoring plugin dependencies on
+    # startup. Importing Cognee here starts a second LanceDB/Cognee process
+    # lifecycle before run_ui.py initializes the same plugin via init_a0.
+    # Runtime init/migrations are handled by the init_a0 extension instead.

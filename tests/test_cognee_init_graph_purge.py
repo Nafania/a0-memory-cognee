@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import gc
 import os
 import sqlite3
 import struct
@@ -7,7 +8,9 @@ import sys
 import tempfile
 import types
 import unittest
+import weakref
 from contextlib import closing
+from datetime import timedelta
 from pathlib import Path
 
 
@@ -80,6 +83,7 @@ class CogneeInitStartupTest(unittest.TestCase):
         for name in list(sys.modules):
             if name.startswith("cognee.infrastructure.databases.vector.lancedb"):
                 sys.modules.pop(name, None)
+        sys.modules.pop("lancedb", None)
 
     def test_rewrites_legacy_data_storage_locations_to_current_data_root(self):
         cognee_init = _load_cognee_init_module()
@@ -411,6 +415,153 @@ class CogneeInitStartupTest(unittest.TestCase):
         self.assertEqual(defaults["source_content_hash"], None)
         self.assertEqual(defaults["metadata"], {})
         self.assertEqual(defaults["text"], "")
+
+    def test_patches_remote_lancedb_table_replay_step_to_avoid_self_cycle(self):
+        cognee_init = _load_cognee_init_module()
+
+        module_name = "cognee.infrastructure.databases.vector.lancedb.subprocess.proxy"
+        fake_module = types.ModuleType(module_name)
+
+        class Request:
+            def __init__(self, op, args=(), handle_id=None):
+                self.op = op
+                self.args = args
+                self.handle_id = handle_id
+
+        class ReplayStep:
+            def __init__(self, make_request, apply_new_handle=None):
+                self.make_request = make_request
+                self.apply_new_handle = apply_new_handle
+
+        class Session:
+            def __init__(self):
+                self.steps = []
+                self.released = []
+                self._closed = False
+
+            def add_replay_step(self, step):
+                self.steps.append(step)
+
+            def remove_replay_step(self, step):
+                self.steps.remove(step)
+
+            def call(self, request):
+                self.released.append(request.handle_id)
+
+        class RemoteLanceDBTable:
+            def _apply_new_handle(self, new_handle_id: int):
+                old = self._handle_id
+                self._handle_id = new_handle_id
+                return old
+
+            def _deregister_replay(self):
+                step = getattr(self, "_replay_step", None)
+                if step is not None:
+                    self._session.remove_replay_step(step)
+                    self._replay_step = None
+
+            def release_sync(self):
+                if self._handle_id is None:
+                    return
+                hid = self._handle_id
+                self._handle_id = None
+                self._deregister_replay()
+                self._session.call(Request(op=99, handle_id=hid))
+
+            def __del__(self):
+                if getattr(self, "_handle_id", None) is not None:
+                    self.release_sync()
+
+        fake_module.OP_OPEN_TABLE = 7
+        fake_module.Request = Request
+        fake_module.ReplayStep = ReplayStep
+        fake_module.RemoteLanceDBTable = RemoteLanceDBTable
+        sys.modules[module_name] = fake_module
+
+        cognee_init._patch_lancedb_remote_table_replay_refs()
+
+        session = Session()
+        table = RemoteLanceDBTable(session, 5, "DocumentChunk_text")
+        self.assertEqual(len(session.steps), 1)
+        replay_step = session.steps[0]
+        self.assertEqual(replay_step.make_request().args, ("DocumentChunk_text",))
+        self.assertEqual(replay_step.apply_new_handle(8), 5)
+
+        table_ref = weakref.ref(table)
+        del table
+        gc.collect()
+
+        self.assertIsNone(table_ref())
+        self.assertEqual(session.released, [8])
+        self.assertEqual(session.steps, [])
+
+    def test_optimizes_fragmented_lancedb_tables_before_search_is_enabled(self):
+        cognee_init = _load_cognee_init_module()
+
+        calls = []
+        fake_lancedb = types.ModuleType("lancedb")
+
+        class FakeTable:
+            def __init__(self, table_name):
+                self.table_name = table_name
+
+            async def optimize(self, *, cleanup_older_than=None, **kwargs):
+                calls.append(("optimize", self.table_name, cleanup_older_than))
+                return "fake-stats"
+
+        class FakeDB:
+            def __init__(self, db_path):
+                self.db_path = db_path
+
+            async def open_table(self, table_name):
+                calls.append(("open_table", self.db_path, table_name))
+                return FakeTable(table_name)
+
+        async def connect_async(db_path):
+            calls.append(("connect", db_path))
+            return FakeDB(db_path)
+
+        fake_lancedb.connect_async = connect_async
+        sys.modules["lancedb"] = fake_lancedb
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_root = Path(tmp_dir) / "cognee_system"
+            large_table = (
+                system_root
+                / "databases"
+                / "dataset.lance.db"
+                / "Entity_name.lance"
+            )
+            small_table = (
+                system_root
+                / "databases"
+                / "dataset.lance.db"
+                / "DocumentChunk_text.lance"
+            )
+            large_table.mkdir(parents=True)
+            small_table.mkdir(parents=True)
+            for i in range(4):
+                (large_table / f"segment_{i}.bin").write_text("x")
+            for i in range(2):
+                (small_table / f"segment_{i}.bin").write_text("x")
+
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            try:
+                optimized = asyncio.run(
+                    cognee_init._optimize_fragmented_lancedb_tables(min_files=4)
+                )
+            finally:
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+
+        self.assertEqual(optimized, 1)
+        self.assertEqual(calls[0][0], "connect")
+        self.assertTrue(calls[0][1].endswith("dataset.lance.db"))
+        self.assertEqual(calls[1][0:3], ("open_table", calls[0][1], "Entity_name"))
+        self.assertEqual(calls[2], ("optimize", "Entity_name", timedelta(seconds=0)))
 
     def test_startup_does_not_purge_ladybug_graph_files(self):
         cognee_init = _load_cognee_init_module()

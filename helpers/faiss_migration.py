@@ -4,7 +4,7 @@ Migration script: FAISS -> Cognee
 Idempotent migration that preserves all original data and tracks progress
 per-document. Safe to interrupt and restart -- will skip already migrated items.
 
-Wrapped as a plugin helper with a migrate() entry point called from hooks.py.
+Wrapped as a plugin helper with a migrate() entry point for explicit legacy imports.
 """
 
 import asyncio
@@ -541,5 +541,5 @@ async def cleanup_backup_datasets(base_dir: str):
 
 
 def migrate():
-    """Entry point called from hooks.py install hook."""
+    """Run the explicit legacy FAISS -> Cognee migration."""
     asyncio.run(run_migration())

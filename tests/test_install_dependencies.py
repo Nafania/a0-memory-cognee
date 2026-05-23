@@ -30,7 +30,7 @@ class InstallDependenciesTest(unittest.TestCase):
         self.assertIn('pinned_openai = "openai<3"', hooks)
         self.assertNotIn("openai=={ver}", hooks)
 
-    def test_install_runs_cognee_init_in_fresh_python_process(self):
+    def test_install_does_not_initialize_cognee(self):
         module_path = REPO_ROOT / "hooks.py"
         spec = importlib.util.spec_from_file_location(
             "memory_cognee_hooks_under_test",
@@ -72,23 +72,10 @@ class InstallDependenciesTest(unittest.TestCase):
         helpers.plugins = plugins
         helpers.print_style = print_style
 
-        cognee_init = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_init")
-        cognee_init.ensure_tables_sync = lambda: (_ for _ in ()).throw(
-            AssertionError("Cognee init must run in a fresh Python subprocess")
-        )
-        faiss_migration = types.ModuleType(
-            "usr.plugins.memory_cognee.helpers.faiss_migration"
-        )
-        faiss_migration.migrate = lambda: (_ for _ in ()).throw(
-            AssertionError("FAISS migration must run in a fresh Python subprocess")
-        )
-
         module_stubs = {
             "helpers": helpers,
             "helpers.plugins": plugins,
             "helpers.print_style": print_style,
-            "usr.plugins.memory_cognee.helpers.cognee_init": cognee_init,
-            "usr.plugins.memory_cognee.helpers.faiss_migration": faiss_migration,
         }
         old_modules = {name: sys.modules.get(name) for name in module_stubs}
         sys.modules.update(module_stubs)
@@ -101,12 +88,9 @@ class InstallDependenciesTest(unittest.TestCase):
                 else:
                     sys.modules[name] = old_module
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0:4], [sys.executable, "-m", "pip", "install"])
         self.assertIn("openai<3", calls[0])
-        self.assertEqual(calls[1][0:2], [sys.executable, "-c"])
-        self.assertIn("ensure_tables_sync", calls[1][2])
-        self.assertIn("faiss_migration", calls[1][2])
 
 
 if __name__ == "__main__":

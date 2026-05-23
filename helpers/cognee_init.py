@@ -1,5 +1,7 @@
 import os
 import logging
+from datetime import timedelta
+from pathlib import Path
 from typing import Any, TypeVar
 
 from helpers import dotenv, files
@@ -52,6 +54,8 @@ _configured = False
 _init_done = False
 _cognee_module = None
 _search_type_class = None
+
+_LANCEDB_OPTIMIZE_FILE_THRESHOLD = 512
 
 
 def get_cognee_setting(name: str, default: T) -> T:
@@ -228,6 +232,7 @@ def configure_cognee() -> None:
 
     _cognee_module = cognee
     _search_type_class = SearchType
+    _patch_lancedb_remote_table_replay_refs()
 
     # --- Read model config from _model_config plugin ---
     from helpers import plugins as _plugins
@@ -333,6 +338,7 @@ async def _create_db_tables():
     _sync_missing_columns()
     _rewrite_legacy_data_storage_locations()
     _quarantine_missing_data_files()
+    await _optimize_fragmented_lancedb_tables()
     affected_datasets = await _detect_datasets_with_unready_graphs()
     if affected_datasets:
         await _reset_cognify_status_for_datasets(affected_datasets)
@@ -385,6 +391,146 @@ def _patch_lancedb_migration_defaults() -> None:
         LanceDBAdapter._a0_memory_cognee_defaults_patch = True
     except Exception as e:
         PrintStyle.warning(f"Could not patch LanceDB migration defaults: {e}")
+
+
+def _patch_lancedb_remote_table_replay_refs() -> None:
+    """Avoid retaining every subprocess LanceDB table through replay callbacks.
+
+    Cognee's subprocess proxy registers a replay step for each opened LanceDB
+    table so worker respawns can reopen it. In 1.1.0 that replay step closes
+    over the RemoteLanceDBTable instance directly, so the session keeps the
+    table alive and its __del__ never releases the worker-side handle. Graph
+    search opens several tables per query; under normal chat recall this can
+    grow until LanceDB fails with "Too many open files".
+    """
+    try:
+        import weakref
+        from cognee.infrastructure.databases.vector.lancedb.subprocess.proxy import (
+            OP_OPEN_TABLE,
+            RemoteLanceDBTable,
+            ReplayStep,
+            Request,
+        )
+
+        if getattr(RemoteLanceDBTable, "_a0_memory_cognee_weak_replay_patch", False):
+            return
+
+        def _patched_init(self, session, handle_id: int, name: str):
+            self._session = session
+            self._handle_id = handle_id
+            self.name = name
+
+            table_ref = weakref.ref(self)
+            table_name = name
+
+            def _make_request():
+                return Request(op=OP_OPEN_TABLE, args=(table_name,))
+
+            def _apply_new_handle(new_handle_id: int):
+                table = table_ref()
+                if table is None:
+                    return None
+                return table._apply_new_handle(new_handle_id)
+
+            self._replay_step = ReplayStep(
+                make_request=_make_request,
+                apply_new_handle=_apply_new_handle,
+            )
+            self._session.add_replay_step(self._replay_step)
+
+        RemoteLanceDBTable.__init__ = _patched_init
+        RemoteLanceDBTable._a0_memory_cognee_weak_replay_patch = True
+    except Exception as e:
+        PrintStyle.warning(f"Could not patch LanceDB subprocess table replay refs: {e}")
+
+
+def _count_files_under(path: Path) -> int:
+    return sum(1 for child in path.rglob("*") if child.is_file())
+
+
+def _find_fragmented_lancedb_tables(
+    system_root: str,
+    *,
+    min_files: int = _LANCEDB_OPTIMIZE_FILE_THRESHOLD,
+) -> list[tuple[int, Path, str, Path]]:
+    databases_root = Path(system_root) / "databases"
+    if not databases_root.exists():
+        return []
+
+    targets: list[tuple[int, Path, str, Path]] = []
+    for table_dir in databases_root.rglob("*.lance"):
+        if not table_dir.is_dir():
+            continue
+        file_count = _count_files_under(table_dir)
+        if file_count >= min_files:
+            table_name = table_dir.name[: -len(".lance")]
+            targets.append((file_count, table_dir.parent, table_name, table_dir))
+
+    targets.sort(reverse=True, key=lambda item: item[0])
+    return targets
+
+
+async def _optimize_fragmented_lancedb_tables(
+    *,
+    min_files: int = _LANCEDB_OPTIMIZE_FILE_THRESHOLD,
+) -> int:
+    """Compact fragmented LanceDB tables before graph search can open them.
+
+    Cognee GRAPH_COMPLETION searches with a node_name filter can scan whole
+    vector collections. On heavily updated LanceDB tables, each collection may
+    contain thousands of segment/version files; a single search can then exceed
+    production's nofile limit. LanceDB optimize compacts live fragments and
+    prunes old versions without changing the stored data or recall flow.
+    """
+    system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
+    if not system_root:
+        return 0
+
+    targets = _find_fragmented_lancedb_tables(system_root, min_files=min_files)
+    if not targets:
+        return 0
+
+    try:
+        import lancedb
+    except Exception as e:
+        raise RuntimeError(
+            f"Cannot import lancedb to optimize {len(targets)} fragmented table(s): {e}"
+        ) from e
+
+    total_before = sum(file_count for file_count, _, _, _ in targets)
+    PrintStyle.warning(
+        "Detected "
+        f"{len(targets)} fragmented LanceDB table(s) with {total_before} files; "
+        "optimizing before Cognee search is enabled."
+    )
+
+    optimized = 0
+    failures: list[str] = []
+    for before_count, db_dir, table_name, table_dir in targets:
+        try:
+            db = await lancedb.connect_async(str(db_dir))
+            table = await db.open_table(table_name)
+            stats = await table.optimize(cleanup_older_than=timedelta(seconds=0))
+            after_count = _count_files_under(table_dir)
+            optimized += 1
+            PrintStyle.standard(
+                "Optimized LanceDB table "
+                f"{db_dir.name}/{table_name}: files {before_count}->{after_count}; "
+                f"stats={stats}"
+            )
+        except Exception as e:
+            detail = f"{db_dir.name}/{table_name}: {type(e).__name__}: {e}"
+            failures.append(detail)
+            PrintStyle.error(f"LanceDB optimization failed for {detail}")
+
+    if failures:
+        raise RuntimeError(
+            "LanceDB optimization failed for "
+            f"{len(failures)} table(s); Cognee search may still fail with open FD "
+            f"exhaustion: {failures[:5]}"
+        )
+
+    return optimized
 
 
 def _rewrite_legacy_data_storage_locations() -> int:

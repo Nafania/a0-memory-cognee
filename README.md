@@ -9,7 +9,7 @@ Replaces the builtin FAISS-based `_memory` plugin with an embedded [Cognee](http
 - **Interactive graph visualization** — explore the knowledge graph visually with Cytoscape.js, click nodes, navigate relationships.
 - **Background processing** — a background worker periodically runs `cognee.cognify()` and `cognee.improve()` on dirty datasets.
 - **Memory feedback** — durable disk queue forwards user feedback (positive/negative) to Cognee's feedback API.
-- **FAISS migration** — on install, existing FAISS data under `usr/memory/` is automatically migrated to Cognee.
+- **LanceDB maintenance** — startup compacts heavily fragmented vector tables before enabling Cognee search.
 - **Full dashboard** — WebUI memory dashboard with search, dynamic area filtering, bulk delete, export, and knowledge graph view.
 - **Cognee 1.1.0** — uses Cognee V2 APIs where beneficial (`improve()`, `forget()`, `run_startup_migrations()`) and is exact-pinned because Cognee storage and dependency migrations can affect production data.
 
@@ -45,7 +45,9 @@ Then restart Agent Zero or toggle the plugin off/on in **Settings → Plugins**.
 The `hooks.py` install hook will:
 - `pip install cognee[fastembed]==1.1.0` (exact-pinned in `requirements.txt`)
 - Disable the builtin `_memory` plugin
-- Migrate any existing FAISS data
+
+Cognee database startup/migration runs in Agent Zero's main process during
+`init_a0`, not from the install hook.
 
 ## Configuration
 
