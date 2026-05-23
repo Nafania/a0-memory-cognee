@@ -14,6 +14,16 @@ class InstallDependenciesTest(unittest.TestCase):
 
         self.assertNotIn("litellm==", requirements)
 
+    def test_requirements_pin_latest_stable_cognee(self):
+        requirements = (REPO_ROOT / "requirements.txt").read_text()
+
+        self.assertIn("cognee[fastembed]==1.1.0", requirements)
+
+    def test_cognee_debug_logs_are_disabled_by_default(self):
+        default_config = (REPO_ROOT / "default_config.yaml").read_text()
+
+        self.assertIn("cognee_debug_enabled: false", default_config)
+
     def test_install_allows_openai_two_for_cognee_litellm(self):
         hooks = (REPO_ROOT / "hooks.py").read_text()
 

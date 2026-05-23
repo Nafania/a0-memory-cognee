@@ -16,7 +16,6 @@ from enum import Enum
 from agent import Agent, AgentContext
 import models
 import logging
-from .cognee_init import get_cognee_setting
 
 
 def _get_cognee():
@@ -247,11 +246,18 @@ class Memory:
         self, query: str, limit: int, threshold: float, filter: str = "",
         include_default: bool = True, session_id: str | None = None,
     ) -> list[Document]:
-        cognee, SearchType = _get_cognee()
-        from cognee.modules.engine.models.node_set import NodeSet
-
         node_names = _parse_filter_to_node_names(filter)
         datasets = self.get_search_datasets() if include_default else [self.dataset_name]
+        from .cognee_background import CogneeBackgroundWorker
+
+        worker = CogneeBackgroundWorker.get_instance()
+        block_reason = worker.get_search_block_reason(datasets)
+        if block_reason:
+            PrintStyle.warning(f"cognee.search skipped: {block_reason}")
+            return []
+
+        cognee, SearchType = _get_cognee()
+        from cognee.modules.engine.models.node_set import NodeSet
 
         try:
             results = await cognee.search(
@@ -262,6 +268,7 @@ class Memory:
                 node_name=node_names if node_names else None,
                 session_id=session_id,
                 only_context=True,
+                # Cognee verbose controls result shape: objects_result carries node metadata.
                 verbose=True,
             )
         except Exception as e:
@@ -269,9 +276,7 @@ class Memory:
             return []
 
         if not results:
-            from .cognee_background import CogneeBackgroundWorker
-
-            CogneeBackgroundWorker.get_instance().nudge_rebuild_if_unready(
+            worker.nudge_rebuild_if_unready(
                 datasets,
                 "empty search result",
             )
@@ -454,6 +459,45 @@ def recall_text_and_feedback_items(
     return texts, items
 
 
+def split_recall_answers_by_area(
+    answers: Any,
+    memory_limit: int,
+    solution_limit: int,
+) -> tuple[list[Document], list[Document]]:
+    """Split one broad recall result into normal memories and solutions."""
+    docs = _results_to_documents(answers or [], memory_limit + solution_limit)
+    memories: list[Document] = []
+    solutions: list[Document] = []
+
+    for doc in docs:
+        area = _document_area(doc)
+        if area == Memory.Area.SOLUTIONS.value:
+            solutions.append(doc)
+        elif area in (Memory.Area.MAIN.value, Memory.Area.FRAGMENTS.value):
+            memories.append(doc)
+        else:
+            memories.append(doc)
+
+    return memories[:memory_limit], solutions[:solution_limit]
+
+
+def _document_area(doc: Document) -> str:
+    metadata = getattr(doc, "metadata", {}) or {}
+    for key in ("area", "node_set", "node_name"):
+        raw = metadata.get(key)
+        if raw:
+            area = _normalize_area(raw)
+            if area:
+                return area
+    return ""
+
+
+def _normalize_area(raw: Any) -> str:
+    area = parse_node_set_area(raw)
+    valid = {item.value for item in Memory.Area}
+    return area if area in valid else ""
+
+
 def _results_to_documents(results: Any, limit: int) -> list[Document]:
     docs = []
     if not results:
@@ -472,8 +516,14 @@ def _results_to_documents(results: Any, limit: int) -> list[Document]:
             content = item
         elif isinstance(item, dict):
             content = item.get("text", item.get("content", ""))
+            raw_metadata = item.get("metadata")
+            if isinstance(raw_metadata, dict):
+                metadata.update(raw_metadata)
             if item.get("id"):
                 metadata["id"] = str(item["id"])
+            for key in ("area", "node_set", "node_name", "type"):
+                if item.get(key) is not None:
+                    metadata[key] = item[key]
         elif hasattr(item, "text"):
             content = str(item.text)
         elif hasattr(item, "page_content"):
@@ -556,6 +606,11 @@ def _extract_nodes_to_flat(
         elif hasattr(obj, "attributes") and hasattr(obj, "id"):
             nodes = [obj]
 
+        edge_area = ""
+        for node in nodes:
+            attrs = getattr(node, "attributes", {}) or {}
+            edge_area = _area_from_node_attrs(attrs) or edge_area
+
         for node in nodes:
             node_id = getattr(node, "id", None)
             if node_id and node_id in seen_ids:
@@ -571,7 +626,27 @@ def _extract_nodes_to_flat(
                 entry: dict[str, Any] = {"text": text.strip()}
                 if node_id:
                     entry["id"] = str(node_id)
+                area = _area_from_node_attrs(attrs) or edge_area
+                if area:
+                    entry["area"] = area
                 flat.append((entry, dataset_name))
+
+
+def _area_from_node_attrs(attrs: dict[str, Any]) -> str:
+    for key in ("area", "node_set", "node_name"):
+        raw = attrs.get(key)
+        if raw:
+            area = _normalize_area(raw)
+            if area:
+                return area
+
+    name = attrs.get("name")
+    if name:
+        area = _normalize_area(name)
+        if area:
+            return area
+
+    return ""
 
 
 def _extract_dataset_name(result: Any) -> str:

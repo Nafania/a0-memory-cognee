@@ -1,6 +1,10 @@
 import asyncio
 from helpers.extension import Extension
-from usr.plugins.memory_cognee.helpers.memory import Memory, recall_text_and_feedback_items
+from usr.plugins.memory_cognee.helpers.memory import (
+    Memory,
+    recall_text_and_feedback_items,
+    split_recall_answers_by_area,
+)
 from agent import LoopData
 from helpers import plugins, log
 from helpers.print_style import PrintStyle
@@ -62,39 +66,50 @@ class RecallMemories(Extension):
             )
             return
 
+        db = await Memory.get(self.agent)
+
+        datasets = db.get_search_datasets()
+        from usr.plugins.memory_cognee.helpers.cognee_background import (
+            CogneeBackgroundWorker,
+        )
+
+        block_reason = CogneeBackgroundWorker.get_instance().get_search_block_reason(
+            datasets
+        )
+        if block_reason:
+            log_item.update(
+                heading="Memory rebuild in progress; skipping recall",
+                content=block_reason,
+            )
+            return
+
         from usr.plugins.memory_cognee.helpers.cognee_init import get_cognee
         cognee, _ = get_cognee()
         from cognee.modules.engine.models.node_set import NodeSet
 
-        db = await Memory.get(self.agent)
-
-        datasets = db.get_search_datasets()
         mem_node_name = [Memory.Area.MAIN.value, Memory.Area.FRAGMENTS.value]
         sol_node_name = [Memory.Area.SOLUTIONS.value]
+        combined_node_name = mem_node_name + sol_node_name
+        memory_search_limit = cfg["memory_recall_memories_max_search"]
+        solution_search_limit = cfg["memory_recall_solutions_max_search"]
 
         try:
             session_id = getattr(self.agent.context, 'id', None)
-            mem_answers, sol_answers = await asyncio.gather(
-                cognee.search(
-                    query_text=query,
-                    top_k=cfg["memory_recall_memories_max_search"],
-                    datasets=datasets,
-                    node_type=NodeSet,
-                    node_name=mem_node_name,
-                    session_id=session_id,
-                    only_context=True,
-                    verbose=True,
-                ),
-                cognee.search(
-                    query_text=query,
-                    top_k=cfg["memory_recall_solutions_max_search"],
-                    datasets=datasets,
-                    node_type=NodeSet,
-                    node_name=sol_node_name,
-                    session_id=session_id,
-                    only_context=True,
-                    verbose=True,
-                ),
+            combined_answers = await cognee.search(
+                query_text=query,
+                top_k=memory_search_limit + solution_search_limit,
+                datasets=datasets,
+                node_type=NodeSet,
+                node_name=combined_node_name,
+                session_id=session_id,
+                only_context=True,
+                # Cognee verbose controls result shape: objects_result carries node metadata.
+                verbose=True,
+            )
+            mem_answers, sol_answers = split_recall_answers_by_area(
+                combined_answers,
+                memory_search_limit,
+                solution_search_limit,
             )
         except OSError as e:
             try:

@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import Any, TypeVar
 
 from helpers import dotenv, files
@@ -21,6 +22,7 @@ _COGNEE_DEFAULTS: dict[str, Any] = {
     "cognee_chunk_size": 512,
     "cognee_chunk_overlap": 50,
     "cognee_search_system_prompt": "",
+    "cognee_debug_enabled": False,
 }
 
 _PROVIDER_MAP: dict[str, str] = {
@@ -67,6 +69,32 @@ def get_cognee_setting(name: str, default: T) -> T:
         return default
     except (ValueError, TypeError):
         return _COGNEE_DEFAULTS.get(name, default)  # type: ignore
+
+
+def is_cognee_debug_enabled() -> bool:
+    return get_cognee_setting("cognee_debug_enabled", False)
+
+
+def _configure_cognee_logging() -> None:
+    """Keep Cognee quiet by default; allow full logs through plugin config."""
+    level_name = "DEBUG" if is_cognee_debug_enabled() else "WARNING"
+    os.environ["LOG_LEVEL"] = level_name
+    if level_name != "DEBUG":
+        os.environ.setdefault("LITELLM_LOG", "ERROR")
+        os.environ.setdefault("LITELLM_SET_VERBOSE", "False")
+
+    level = getattr(logging, level_name, logging.WARNING)
+    for logger_name in (
+        "cognee",
+        "GraphCompletionRetriever",
+        "litellm",
+        "LiteLLM",
+        "httpx",
+        "httpcore",
+        "openai",
+        "urllib3",
+    ):
+        logging.getLogger(logger_name).setLevel(level)
 
 
 def _map_provider(a0_provider: str) -> str:
@@ -159,6 +187,7 @@ def configure_cognee() -> None:
         return
 
     dotenv.load_dotenv()
+    _configure_cognee_logging()
     settings = get_settings()
 
     # --- Storage directories (MUST be set BEFORE import cognee) ---

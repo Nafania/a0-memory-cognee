@@ -66,13 +66,19 @@ def _load_cognee_init_module():
 class CogneeTemporalPromptTest(unittest.TestCase):
     def setUp(self):
         self.old_prompt = os.environ.get("TEMPORAL_GRAPH_PROMPT_PATH")
+        self.old_log_level = os.environ.get("LOG_LEVEL")
         os.environ.pop("TEMPORAL_GRAPH_PROMPT_PATH", None)
+        os.environ.pop("LOG_LEVEL", None)
 
     def tearDown(self):
         if self.old_prompt is None:
             os.environ.pop("TEMPORAL_GRAPH_PROMPT_PATH", None)
         else:
             os.environ["TEMPORAL_GRAPH_PROMPT_PATH"] = self.old_prompt
+        if self.old_log_level is None:
+            os.environ.pop("LOG_LEVEL", None)
+        else:
+            os.environ["LOG_LEVEL"] = self.old_log_level
 
     def test_configures_temporal_prompt_matching_event_list_schema(self):
         cognee_init = _load_cognee_init_module()
@@ -98,6 +104,25 @@ class CogneeTemporalPromptTest(unittest.TestCase):
         cognee_init = _load_cognee_init_module()
 
         self.assertTrue(cognee_init.get_cognee_setting("cognee_memify_enabled", False))
+
+    def test_cognee_logging_defaults_to_warning(self):
+        cognee_init = _load_cognee_init_module()
+
+        cognee_init._configure_cognee_logging()
+
+        self.assertEqual(os.environ["LOG_LEVEL"], "WARNING")
+
+    def test_cognee_debug_mode_enables_debug_logging(self):
+        cognee_init = _load_cognee_init_module()
+        cognee_init.get_cognee_setting = (
+            lambda name, default=None: True
+            if name == "cognee_debug_enabled"
+            else default
+        )
+
+        cognee_init._configure_cognee_logging()
+
+        self.assertEqual(os.environ["LOG_LEVEL"], "DEBUG")
 
 
 if __name__ == "__main__":

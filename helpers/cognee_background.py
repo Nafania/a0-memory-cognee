@@ -28,6 +28,7 @@ class CogneeBackgroundWorker:
         self._last_error: str | None = None
         self._last_run_datasets: list[str] = []
         self._last_run_success: bool = False
+        self._dataset_readiness: dict[str, dict[str, object]] = {}
         self._task: DeferredTask | None = None
         self._state_lock = threading.RLock()
 
@@ -44,6 +45,11 @@ class CogneeBackgroundWorker:
             self._dirty_datasets.add(dataset_name)
             self._dirty_versions[dataset_name] = self._dirty_versions.get(dataset_name, 0) + 1
             self._insert_count += 1
+            self._set_dataset_state_locked(
+                dataset_name,
+                "dirty",
+                "Cognee memory graph rebuild pending",
+            )
         self._schedule_run_soon()
 
     def get_status(self) -> dict:
@@ -57,7 +63,54 @@ class CogneeBackgroundWorker:
                 "last_run_datasets": self._last_run_datasets,
                 "last_run_success": self._last_run_success,
                 "last_error": self._last_error,
+                "dataset_readiness": {
+                    dataset: dict(state)
+                    for dataset, state in self._dataset_readiness.items()
+                },
             }
+
+    def get_search_block_reason(self, datasets: list[str]) -> str | None:
+        """Return why graph search must wait, or None when datasets are searchable."""
+        clean_datasets = [dataset for dataset in datasets if dataset]
+        if not clean_datasets:
+            return None
+
+        pending: list[str] = []
+        rebuilding: list[str] = []
+        failed: list[str] = []
+        with self._state_lock:
+            for dataset in clean_datasets:
+                state = str(
+                    self._dataset_readiness.get(dataset, {}).get("state") or ""
+                )
+                if not state or state == "ready":
+                    continue
+                if state == "rebuilding":
+                    rebuilding.append(dataset)
+                elif state == "failed":
+                    failed.append(dataset)
+                else:
+                    pending.append(dataset)
+
+        if rebuilding:
+            return f"Cognee memory graph rebuild running for dataset(s): {rebuilding}"
+        if pending:
+            return f"Cognee memory graph rebuild pending for dataset(s): {pending}"
+        if failed:
+            return f"Cognee memory graph rebuild failed for dataset(s): {failed}"
+        return None
+
+    def _set_dataset_state_locked(
+        self,
+        dataset_name: str,
+        state: str,
+        reason: str | None = None,
+    ) -> None:
+        self._dataset_readiness[dataset_name] = {
+            "state": state,
+            "reason": reason,
+            "updated_at": time.monotonic(),
+        }
 
     def nudge_rebuild_if_unready(self, datasets: list[str], reason: str = "") -> bool:
         """Schedule a rebuild when search runs before any clean cognify pass."""
@@ -123,6 +176,12 @@ class CogneeBackgroundWorker:
                 for dataset in datasets
             }
             self._last_run_datasets = datasets
+            for dataset in datasets:
+                self._set_dataset_state_locked(
+                    dataset,
+                    "rebuilding",
+                    "Cognee memory graph rebuild running",
+                )
 
         config = self._get_config()
 
@@ -178,6 +237,7 @@ class CogneeBackgroundWorker:
                     failed_datasets.append(dataset)
                     with self._state_lock:
                         self._last_error = str(e)
+                        self._set_dataset_state_locked(dataset, "failed", str(e))
                     PrintStyle.error(f"Cognee pipeline failed for dataset {dataset}", str(e))
 
             with self._state_lock:
@@ -187,6 +247,17 @@ class CogneeBackgroundWorker:
                     if self._dirty_versions.get(dataset, 0) == dataset_versions.get(dataset):
                         self._dirty_datasets.discard(dataset)
                         self._dirty_versions.pop(dataset, None)
+                        self._set_dataset_state_locked(
+                            dataset,
+                            "ready",
+                            "Cognee memory graph rebuild completed",
+                        )
+                    else:
+                        self._set_dataset_state_locked(
+                            dataset,
+                            "dirty",
+                            "Cognee memory graph changed during rebuild",
+                        )
 
                 if failed_datasets:
                     should_reschedule = False
@@ -203,6 +274,8 @@ class CogneeBackgroundWorker:
             with self._state_lock:
                 self._last_error = str(e)
                 self._last_run_success = False
+                for dataset in self._last_run_datasets:
+                    self._set_dataset_state_locked(dataset, "failed", str(e))
                 should_reschedule = False
             PrintStyle.error("Cognee pipeline failed", str(e))
         finally:

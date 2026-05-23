@@ -10,4 +10,5 @@ memory_recall_similarity_threshold: 0.7
 memory_memorize_enabled: true
 memory_memorize_consolidation: true
 memory_memorize_replace_threshold: 0.9
+cognee_debug_enabled: false
 agent_memory_subdir: default

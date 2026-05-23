@@ -216,6 +216,22 @@
                             x-text="config.memory_memorize_replace_threshold"></span>
                     </div>
                 </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Cognee debug logs</div>
+                        <div class="field-description">
+                            Enable DEBUG-level Cognee logs for troubleshooting.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox"
+                                x-model="config.cognee_debug_enabled" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
             </div>
         </template>
     </div>

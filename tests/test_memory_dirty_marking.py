@@ -14,9 +14,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 class FakeDirtyWorker:
     def __init__(self):
         self.dirty: list[str] = []
+        self.block_reason: str | None = None
 
     def mark_dirty(self, dataset_name: str):
         self.dirty.append(dataset_name)
+
+    def get_search_block_reason(self, datasets):
+        return self.block_reason
+
+    def nudge_rebuild_if_unready(self, datasets, reason=""):
+        return False
 
 
 def _load_memory_module(tmp_dir: str, worker: FakeDirtyWorker):
@@ -162,6 +169,62 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
 
             self.assertEqual(fake_cognee.added, [("knowledge text", "default", ["main"])])
             self.assertEqual(worker.dirty, ["default"])
+
+    def test_search_skips_cognee_when_rebuild_not_ready(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            worker.block_reason = "Cognee memory graph rebuild pending for dataset(s): ['default']"
+            memory_module = _load_memory_module(tmp_dir, worker)
+            memory_module._get_cognee = lambda: (_ for _ in ()).throw(
+                AssertionError("cognee should not be loaded while rebuild blocks search")
+            )
+
+            memory = memory_module.Memory("default", "default")
+            docs = asyncio.run(
+                memory.search_similarity_threshold(
+                    query="test",
+                    limit=5,
+                    threshold=0.7,
+                )
+            )
+
+            self.assertEqual(docs, [])
+
+    def test_similarity_search_keeps_verbose_result_shape_for_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+
+            class NodeSet:
+                pass
+
+            node_set_module = types.ModuleType("cognee.modules.engine.models.node_set")
+            node_set_module.NodeSet = NodeSet
+            sys.modules["cognee.modules.engine.models.node_set"] = node_set_module
+
+            class FakeCognee:
+                def __init__(self):
+                    self.search_calls = []
+
+                async def search(self, **kwargs):
+                    self.search_calls.append(kwargs)
+                    return [{"search_result": "stored memory", "dataset_name": "default"}]
+
+            fake_cognee = FakeCognee()
+            memory_module._get_cognee = lambda: (fake_cognee, None)
+
+            memory = memory_module.Memory("default", "default")
+            docs = asyncio.run(
+                memory.search_similarity_threshold(
+                    query="test",
+                    limit=5,
+                    threshold=0.7,
+                )
+            )
+
+            self.assertEqual([doc.page_content for doc in docs], ["stored memory"])
+            self.assertEqual(len(fake_cognee.search_calls), 1)
+            self.assertIs(fake_cognee.search_calls[0]["verbose"], True)
 
 
 if __name__ == "__main__":
