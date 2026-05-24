@@ -115,6 +115,19 @@ class MemoryConsolidator:
             PrintStyle().error(f"Memory consolidation timeout for area {area}")
             return {"success": False, "memory_ids": []}
 
+        except SearchUnavailable as e:
+            PrintStyle().warning(
+                f"Memory consolidation skipped for area {area}: {str(e)}"
+            )
+            if log_item:
+                log_item.update(result=f"Memory consolidation skipped: {str(e)}")
+            return {
+                "success": False,
+                "memory_ids": [],
+                "search_unavailable": True,
+                "reason": str(e),
+            }
+
         except Exception as e:
             PrintStyle().error(f"Memory consolidation error for area {area}: {str(e)}")
             return {"success": False, "memory_ids": []}

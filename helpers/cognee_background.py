@@ -57,6 +57,7 @@ class CogneeBackgroundWorker:
 
     def get_status(self) -> dict:
         """Return current status for dashboard."""
+        self._refresh_stale_rebuilds()
         with self._state_lock:
             return {
                 "running": self._running,
@@ -75,6 +76,7 @@ class CogneeBackgroundWorker:
 
     def get_search_block_reason(self, datasets: list[str]) -> str | None:
         """Return why graph search must wait, or None when datasets are searchable."""
+        self._refresh_stale_rebuilds()
         clean_datasets = [dataset for dataset in datasets if dataset]
         if not clean_datasets:
             return None
@@ -123,6 +125,76 @@ class CogneeBackgroundWorker:
             "updated_at": time.monotonic(),
         }
 
+    def _refresh_stale_rebuilds(self) -> None:
+        """Expire rebuild states that outlived the worker operation timeout path."""
+        config = self._get_config()
+        stale_after = float(config["rebuild_stale_after"])
+        if stale_after <= 0:
+            return
+
+        stale_rebuilds: list[tuple[str, str]] = []
+        should_schedule_retry = False
+        with self._state_lock:
+            now = time.monotonic()
+            for dataset, readiness in list(self._dataset_readiness.items()):
+                if readiness.get("state") != "rebuilding":
+                    continue
+
+                updated_at = readiness.get("updated_at")
+                if not isinstance(updated_at, (int, float)):
+                    continue
+
+                age_seconds = now - float(updated_at)
+                if age_seconds < stale_after:
+                    continue
+
+                if self._running:
+                    detail = (
+                        "worker still reports running; not scheduling parallel retry"
+                    )
+                else:
+                    detail = "retry scheduled"
+                    should_schedule_retry = True
+
+                reason = (
+                    "Cognee memory graph rebuild state is stale "
+                    f"after {age_seconds:.0f}s ({detail})"
+                )
+                self._dirty_datasets.add(dataset)
+                self._last_error = reason
+                self._last_run_success = False
+                self._set_dataset_state_locked(dataset, "failed", reason)
+                stale_rebuilds.append((dataset, reason))
+
+        for dataset, reason in stale_rebuilds:
+            PrintStyle.warning(
+                f"Cognee rebuild state expired for dataset {dataset}: {reason}"
+            )
+
+        if should_schedule_retry:
+            self._schedule_run_soon(float(config["retry_min_delay"]))
+
+    def _mark_unfinished_rebuilds_failed_locked(
+        self,
+        retry_delay: float,
+    ) -> list[str]:
+        unfinished: list[str] = []
+        for dataset in self._last_run_datasets:
+            readiness = self._dataset_readiness.get(dataset, {})
+            if readiness.get("state") != "rebuilding":
+                continue
+
+            reason = (
+                "Cognee memory graph rebuild interrupted before readiness update; "
+                f"retry scheduled in {retry_delay:.0f}s"
+            )
+            self._dirty_datasets.add(dataset)
+            self._last_error = reason
+            self._last_run_success = False
+            self._set_dataset_state_locked(dataset, "failed", reason)
+            unfinished.append(dataset)
+        return unfinished
+
     def nudge_rebuild_if_unready(self, datasets: list[str], reason: str = "") -> bool:
         """Schedule a rebuild when search runs before any clean cognify pass."""
         with self._state_lock:
@@ -152,6 +224,8 @@ class CogneeBackgroundWorker:
             "memify_enabled": get_cognee_setting("cognee_memify_enabled", True),
             "retry_min_delay": get_cognee_setting("cognee_rebuild_retry_min_seconds", 30),
             "retry_max_delay": get_cognee_setting("cognee_rebuild_retry_max_seconds", 300),
+            "operation_timeout": get_cognee_setting("cognee_operation_timeout_seconds", 1800),
+            "rebuild_stale_after": get_cognee_setting("cognee_rebuild_stale_after_seconds", 3600),
         }
 
     async def _should_run(self) -> bool:
@@ -222,6 +296,7 @@ class CogneeBackgroundWorker:
                             cognee.cognify,
                             datasets=[dataset],
                             temporal_cognify=True,
+                            operation_timeout=float(config["operation_timeout"]),
                         )
                     else:
                         await run_cognee_operation(
@@ -229,6 +304,7 @@ class CogneeBackgroundWorker:
                             cognee.cognify,
                             datasets=[dataset],
                             temporal_cognify=False,
+                            operation_timeout=float(config["operation_timeout"]),
                         )
 
                     PrintStyle.standard(f"Cognee cognify completed for dataset: {dataset}")
@@ -246,6 +322,7 @@ class CogneeBackgroundWorker:
                                 "cognee.improve background",
                                 cognee.improve,
                                 dataset=dataset,
+                                operation_timeout=float(config["operation_timeout"]),
                             )
                             PrintStyle.standard(f"Cognee improve completed for dataset: {dataset}")
                         except Exception as e:
@@ -323,8 +400,24 @@ class CogneeBackgroundWorker:
                 reschedule_delay = None
             PrintStyle.error("Cognee pipeline failed", str(e))
         finally:
+            unfinished_datasets: list[str] = []
             with self._state_lock:
+                retry_delay = float(config["retry_min_delay"])
+                unfinished_datasets = self._mark_unfinished_rebuilds_failed_locked(
+                    retry_delay,
+                )
+                if unfinished_datasets:
+                    should_reschedule = True
+                    reschedule_delay = max(
+                        retry_delay,
+                        float(reschedule_delay or 0),
+                    )
                 self._running = False
+            for dataset in unfinished_datasets:
+                PrintStyle.error(
+                    "Cognee pipeline did not complete readiness update",
+                    f"dataset={dataset}",
+                )
             if should_reschedule:
                 self._schedule_run_soon(reschedule_delay)
 

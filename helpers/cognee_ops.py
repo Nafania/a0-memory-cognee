@@ -18,6 +18,7 @@ async def run_cognee_operation(
     operation: Callable[..., Any],
     *args,
     timeout: float = _DEFAULT_WAIT_TIMEOUT,
+    operation_timeout: float | None = None,
     **kwargs,
 ) -> T:
     """Serialize Cognee backend operations across async tasks and threads."""
@@ -35,6 +36,13 @@ async def run_cognee_operation(
     try:
         result = operation(*args, **kwargs)
         if inspect.isawaitable(result):
+            if operation_timeout and operation_timeout > 0:
+                try:
+                    return await asyncio.wait_for(result, timeout=operation_timeout)
+                except TimeoutError as e:
+                    raise TimeoutError(
+                        f"Cognee operation timed out after {operation_timeout:.0f}s: {label}"
+                    ) from e
             return await result
         return result
     finally:

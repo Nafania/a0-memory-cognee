@@ -360,6 +360,108 @@ class CogneeBackgroundTest(unittest.TestCase):
         )
         self.assertEqual(scheduled_runs, [30.0])
 
+    def test_hung_cognify_times_out_and_unblocks_rebuild_state(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+
+        async def cognify(*, datasets, temporal_cognify):
+            await asyncio.sleep(0.05)
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        fake_cognee.datasets = FakeDatasets()
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        background.get_cognee_setting = (
+            lambda key, default=None: 0.01
+            if key == "cognee_operation_timeout_seconds"
+            else default
+        )
+        worker = background.CogneeBackgroundWorker()
+        scheduled_runs = []
+        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker.mark_dirty("default")
+        scheduled_runs.clear()
+
+        asyncio.run(worker.run_pipeline())
+
+        status = worker.get_status()
+        self.assertFalse(status["running"])
+        self.assertFalse(status["last_run_success"])
+        self.assertEqual(status["dataset_readiness"]["default"]["state"], "failed")
+        self.assertIn("timed out", status["last_error"].lower())
+        self.assertIn("Cognee memory graph rebuild failed", worker.get_search_block_reason(["default"]))
+        self.assertEqual(scheduled_runs, [30.0])
+
+    def test_cancelled_rebuild_marks_state_failed_before_exit(self):
+        fake_cognee = types.ModuleType("cognee")
+
+        async def cognify(*, datasets, temporal_cognify):
+            raise asyncio.CancelledError()
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = lambda dataset: None
+
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        scheduled_runs = []
+        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker.mark_dirty("default")
+        scheduled_runs.clear()
+
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(worker.run_pipeline())
+
+        status = worker.get_status()
+        self.assertFalse(status["running"])
+        self.assertEqual(status["dataset_readiness"]["default"]["state"], "failed")
+        self.assertIn(
+            "interrupted before readiness update",
+            status["dataset_readiness"]["default"]["reason"],
+        )
+        self.assertIn("default", status["dirty_datasets"])
+        self.assertEqual(scheduled_runs, [30.0])
+
+    def test_stale_rebuilding_state_is_marked_failed_for_retry(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        background.get_cognee_setting = (
+            lambda key, default=None: 1
+            if key == "cognee_rebuild_stale_after_seconds"
+            else default
+        )
+        worker = background.CogneeBackgroundWorker()
+        scheduled_runs = []
+        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker.mark_dirty("default")
+        scheduled_runs.clear()
+        with worker._state_lock:
+            worker._running = True
+            worker._set_dataset_state_locked(
+                "default",
+                "rebuilding",
+                "Cognee memory graph rebuild running",
+            )
+            worker._dataset_readiness["default"]["updated_at"] = time.monotonic() - 5
+
+        reason = worker.get_search_block_reason(["default"])
+
+        status = worker.get_status()
+        self.assertIn("Cognee memory graph rebuild failed", reason)
+        self.assertEqual(status["dataset_readiness"]["default"]["state"], "failed")
+        self.assertIn("stale", status["dataset_readiness"]["default"]["reason"])
+        self.assertEqual(scheduled_runs, [])
+
     def test_start_is_idempotent(self):
         fake_cognee = types.ModuleType("cognee")
         background = _load_background_module(fake_cognee)

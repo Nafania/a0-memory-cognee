@@ -270,6 +270,34 @@ class MemoryConsolidationUpdateTest(unittest.TestCase):
         self.assertEqual(result, [])
         self.assertEqual(captured[0]["raise_unavailable"], True)
 
+    def test_process_new_memory_skips_when_search_unavailable(self):
+        module = _load_consolidation_module()
+        consolidator = module.MemoryConsolidator(agent=object())
+
+        class FakeDB:
+            async def search_similarity_threshold(self, **kwargs):
+                raise module.SearchUnavailable("Cognee memory graph rebuild running")
+
+            async def insert_text(self, text, metadata):
+                raise AssertionError("insert should not run while search is unavailable")
+
+        async def get_memory(agent):
+            return FakeDB()
+
+        async def no_keywords(new_memory, log_item):
+            return []
+
+        module.Memory.get = get_memory
+        consolidator._extract_search_keywords = no_keywords
+
+        result = asyncio.run(
+            consolidator.process_new_memory("new memory", "fragments", {}, None)
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["memory_ids"], [])
+        self.assertTrue(result["search_unavailable"])
+
 
 if __name__ == "__main__":
     unittest.main()

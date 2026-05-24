@@ -11,4 +11,6 @@ memory_memorize_enabled: true
 memory_memorize_consolidation: true
 memory_memorize_replace_threshold: 0.9
 cognee_debug_enabled: false
+cognee_operation_timeout_seconds: 1800
+cognee_rebuild_stale_after_seconds: 3600
 agent_memory_subdir: default

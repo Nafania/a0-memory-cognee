@@ -26,6 +26,8 @@ _COGNEE_DEFAULTS: dict[str, Any] = {
     "cognee_chunk_overlap": 50,
     "cognee_search_system_prompt": "",
     "cognee_debug_enabled": False,
+    "cognee_operation_timeout_seconds": 1800,
+    "cognee_rebuild_stale_after_seconds": 3600,
 }
 
 _PROVIDER_MAP: dict[str, str] = {
