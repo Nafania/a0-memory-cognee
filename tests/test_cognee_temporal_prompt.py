@@ -105,6 +105,16 @@ class CogneeTemporalPromptTest(unittest.TestCase):
 
         self.assertTrue(cognee_init.get_cognee_setting("cognee_memify_enabled", False))
 
+    def test_get_cognee_setting_reads_plugin_config(self):
+        cognee_init = _load_cognee_init_module()
+        plugins = types.ModuleType("helpers.plugins")
+        plugins.get_plugin_config = lambda name, agent=None: {
+            "cognee_debug_enabled": True,
+        }
+        sys.modules["helpers.plugins"] = plugins
+
+        self.assertTrue(cognee_init.get_cognee_setting("cognee_debug_enabled", False))
+
     def test_cognee_logging_defaults_to_warning(self):
         cognee_init = _load_cognee_init_module()
 

@@ -1,5 +1,6 @@
 import os
 import logging
+import importlib
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -60,20 +61,43 @@ _LANCEDB_OPTIMIZE_FILE_THRESHOLD = 512
 
 
 def get_cognee_setting(name: str, default: T) -> T:
+    target_default = _COGNEE_DEFAULTS.get(name, default)
     env_key = f"A0_SET_{name}"
     env_value = dotenv.get_dotenv_value(env_key, dotenv.get_dotenv_value(env_key.upper(), None))
-    if env_value is None:
-        return _COGNEE_DEFAULTS.get(name, default)  # type: ignore
+    if env_value is not None:
+        return _coerce_cognee_setting(env_value, target_default)
+
+    plugin_value = _get_plugin_config_setting(name)
+    if plugin_value is not None:
+        return _coerce_cognee_setting(plugin_value, target_default)
+
+    return target_default  # type: ignore
+
+
+def _get_plugin_config_setting(name: str) -> Any:
+    try:
+        plugins = importlib.import_module("helpers.plugins")
+        config = plugins.get_plugin_config("memory_cognee") or {}
+        if isinstance(config, dict) and name in config:
+            return config[name]
+    except Exception:
+        return None
+    return None
+
+
+def _coerce_cognee_setting(value: Any, default: T) -> T:
     try:
         if isinstance(default, bool):
-            return env_value.strip().lower() in ("true", "1", "yes", "on")  # type: ignore
+            if isinstance(value, bool):
+                return value  # type: ignore
+            return str(value).strip().lower() in ("true", "1", "yes", "on")  # type: ignore
         elif isinstance(default, int):
-            return type(default)(env_value.strip())  # type: ignore
+            return type(default)(str(value).strip())  # type: ignore
         elif isinstance(default, str):
-            return str(env_value).strip()  # type: ignore
+            return str(value).strip()  # type: ignore
         return default
     except (ValueError, TypeError):
-        return _COGNEE_DEFAULTS.get(name, default)  # type: ignore
+        return default
 
 
 def is_cognee_debug_enabled() -> bool:
