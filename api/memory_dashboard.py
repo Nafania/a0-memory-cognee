@@ -292,9 +292,19 @@ class MemoryDashboard(ApiHandler):
             if not memory_subdir or not original or not edited:
                 return {"success": False, "error": "Missing required parameters"}
 
+            original_id = (
+                original.get("id")
+                or (original.get("metadata") or {}).get("id")
+            )
+            if not original_id:
+                return {"success": False, "error": "Original memory ID is required", "memory": None}
+
+            edited_metadata = dict(edited.get("metadata") or {})
+            edited_metadata["id"] = original_id
+
             doc = Document(
                 page_content=edited["content_full"],
-                metadata=edited["metadata"],
+                metadata=edited_metadata,
             )
 
             memory = await Memory.get_by_subdir(memory_subdir, preload_knowledge=False)

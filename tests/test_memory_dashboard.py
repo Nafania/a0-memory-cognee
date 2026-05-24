@@ -70,6 +70,11 @@ def _load_dashboard_module(captured: dict, *, node_count: int = 2):
                 )
             ]
 
+        async def update_documents(self, docs):
+            captured["updated_metadata"] = dict(docs[0].metadata)
+            captured["updated_content"] = docs[0].page_content
+            return ["new-id"]
+
     memory.Memory = Memory
     memory.get_existing_memory_subdirs = lambda: ["default", "projects/demo"]
     memory.get_context_memory_subdir = lambda context: "default"
@@ -185,6 +190,31 @@ class MemoryDashboardTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(captured["search_threshold"], 0.7)
         self.assertEqual(result["memories"][0]["content_full"], "matched memory")
+
+    def test_update_memory_uses_original_id_as_immutable_target(self):
+        captured = {}
+        module = _load_dashboard_module(captured)
+        handler = module.MemoryDashboard()
+
+        result = asyncio.run(
+            handler._update_memory(
+                {
+                    "memory_subdir": "default",
+                    "original": {
+                        "id": "original-id",
+                        "metadata": {"id": "original-id", "area": "main"},
+                    },
+                    "edited": {
+                        "content_full": "edited memory",
+                        "metadata": {"id": "attacker-id", "area": "main"},
+                    },
+                }
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(captured["updated_content"], "edited memory")
+        self.assertEqual(captured["updated_metadata"]["id"], "original-id")
 
 
 if __name__ == "__main__":
