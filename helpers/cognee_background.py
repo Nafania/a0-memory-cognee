@@ -12,6 +12,7 @@ from helpers.defer import DeferredTask, THREAD_BACKGROUND
 from helpers.print_style import PrintStyle
 from .cognee_graph import read_dataset_graphs
 from .cognee_init import get_cognee_setting
+from .cognee_ops import run_cognee_operation
 
 
 class CogneeBackgroundWorker:
@@ -209,9 +210,19 @@ class CogneeBackgroundWorker:
             for dataset in datasets:
                 try:
                     if config["temporal_enabled"]:
-                        await cognee.cognify(datasets=[dataset], temporal_cognify=True)
+                        await run_cognee_operation(
+                            "cognee.cognify background",
+                            cognee.cognify,
+                            datasets=[dataset],
+                            temporal_cognify=True,
+                        )
                     else:
-                        await cognee.cognify(datasets=[dataset], temporal_cognify=False)
+                        await run_cognee_operation(
+                            "cognee.cognify background",
+                            cognee.cognify,
+                            datasets=[dataset],
+                            temporal_cognify=False,
+                        )
 
                     PrintStyle.standard(f"Cognee cognify completed for dataset: {dataset}")
 
@@ -224,7 +235,11 @@ class CogneeBackgroundWorker:
 
                     if config["memify_enabled"]:
                         try:
-                            await cognee.improve(dataset=dataset)
+                            await run_cognee_operation(
+                                "cognee.improve background",
+                                cognee.improve,
+                                dataset=dataset,
+                            )
                             PrintStyle.standard(f"Cognee improve completed for dataset: {dataset}")
                         except Exception as e:
                             if _is_empty_graph_improve_error(e):

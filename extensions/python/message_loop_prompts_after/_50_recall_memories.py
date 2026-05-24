@@ -8,6 +8,7 @@ from usr.plugins.memory_cognee.helpers.memory import (
 from agent import LoopData
 from helpers import plugins, log
 from helpers.print_style import PrintStyle
+from usr.plugins.memory_cognee.helpers.cognee_ops import run_cognee_operation
 
 DATA_NAME_TASK = "_recall_memories_task"
 DATA_NAME_ITER = "_recall_memories_iter"
@@ -95,7 +96,9 @@ class RecallMemories(Extension):
 
         try:
             session_id = getattr(self.agent.context, 'id', None)
-            combined_answers = await cognee.search(
+            combined_answers = await run_cognee_operation(
+                "cognee.search recall",
+                cognee.search,
                 query_text=query,
                 top_k=memory_search_limit + solution_search_limit,
                 datasets=datasets,

@@ -133,7 +133,7 @@ def _install_stubs(
     ]
     for name in package_names:
         package = types.ModuleType(name)
-        package.__path__ = []
+        package.__path__ = [str(REPO_ROOT / "helpers")] if name.endswith(".helpers") else []
         sys.modules[name] = package
 
     memory = types.ModuleType("usr.plugins.memory_cognee.helpers.memory")

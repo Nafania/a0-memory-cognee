@@ -6,6 +6,7 @@ from simpleeval import simple_eval
 from agent import Agent
 from helpers import guids
 from .cognee_init import configure_cognee
+from .cognee_ops import run_cognee_operation
 
 
 class VectorDB:
@@ -37,7 +38,9 @@ class VectorDB:
         comparator = get_comparator(filter) if filter else None
 
         try:
-            results = await cognee.search(
+            results = await run_cognee_operation(
+                "cognee.search vector db",
+                cognee.search,
                 query_text=query,
                 query_type=SearchType.CHUNKS,
                 top_k=limit * 3,
@@ -96,7 +99,9 @@ class VectorDB:
             self._docs[doc_id] = doc
 
             try:
-                await cognee.add(
+                await run_cognee_operation(
+                    "cognee.add vector db",
+                    cognee.add,
                     doc.page_content,
                     dataset_name=self._dataset_name,
                 )

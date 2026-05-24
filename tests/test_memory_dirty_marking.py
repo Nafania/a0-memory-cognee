@@ -57,7 +57,7 @@ def _load_memory_module(tmp_dir: str, worker: FakeDirtyWorker):
     ]
     for name in package_names:
         package = types.ModuleType(name)
-        package.__path__ = []
+        package.__path__ = [str(REPO_ROOT / "helpers")] if name.endswith(".helpers") else []
         sys.modules[name] = package
 
     knowledge_import = types.ModuleType("usr.plugins.memory_cognee.helpers.knowledge_import")
@@ -225,6 +225,45 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
             self.assertEqual([doc.page_content for doc in docs], ["stored memory"])
             self.assertEqual(len(fake_cognee.search_calls), 1)
             self.assertIs(fake_cognee.search_calls[0]["verbose"], True)
+
+    def test_similarity_search_serializes_cognee_search_calls(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+
+            class NodeSet:
+                pass
+
+            node_set_module = types.ModuleType("cognee.modules.engine.models.node_set")
+            node_set_module.NodeSet = NodeSet
+            sys.modules["cognee.modules.engine.models.node_set"] = node_set_module
+
+            class FakeCognee:
+                def __init__(self):
+                    self.active = 0
+                    self.max_active = 0
+
+                async def search(self, **kwargs):
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                    await asyncio.sleep(0.01)
+                    self.active -= 1
+                    return [{"search_result": "stored memory", "dataset_name": "default"}]
+
+            fake_cognee = FakeCognee()
+            memory_module._get_cognee = lambda: (fake_cognee, None)
+
+            memory = memory_module.Memory("default", "default")
+
+            async def run_searches():
+                await asyncio.gather(
+                    memory.search_similarity_threshold("first", 5, 0.7),
+                    memory.search_similarity_threshold("second", 5, 0.7),
+                )
+
+            asyncio.run(run_searches())
+
+            self.assertEqual(fake_cognee.max_active, 1)
 
     def test_insert_text_reports_underlying_cognee_add_error(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

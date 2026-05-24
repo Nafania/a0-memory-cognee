@@ -14,6 +14,7 @@ import shutil
 import sys
 
 from .cognee_init import configure_cognee
+from .cognee_ops import run_cognee_operation
 
 
 def _log(msg: str):
@@ -262,7 +263,9 @@ async def migrate_index(
 
         for doc_id, doc in docs:
             try:
-                await cognee.add(
+                await run_cognee_operation(
+                    "cognee.add faiss migration",
+                    cognee.add,
                     doc.page_content,
                     dataset_name=dataset_base,
                     node_set=node_sets,
@@ -330,7 +333,9 @@ async def run_cognify(indices: list[dict]):
     if datasets_to_cognify:
         _log(f"\nRunning cognify on {len(datasets_to_cognify)} datasets...")
         try:
-            await cognee.cognify(
+            await run_cognee_operation(
+                "cognee.cognify faiss migration",
+                cognee.cognify,
                 datasets=datasets_to_cognify,
                 temporal_cognify=True,
             )
@@ -349,7 +354,9 @@ async def verify_migration(indices: list[dict]):
     for index_info in indices:
         dataset = subdir_to_dataset(index_info["memory_subdir"])
         try:
-            results = await cognee.search(
+            results = await run_cognee_operation(
+                "cognee.search faiss migration",
+                cognee.search,
                 query_text="test query",
                 query_type=SearchType.CHUNKS,
                 top_k=3,
@@ -521,7 +528,11 @@ async def cleanup_backup_datasets(base_dir: str):
         _log(f"\nCleaning up {len(to_delete)} wrongly-named datasets...")
         for ds in to_delete:
             try:
-                await cognee.forget(dataset=ds.id)
+                await run_cognee_operation(
+                    "cognee.forget faiss cleanup",
+                    cognee.forget,
+                    dataset=ds.id,
+                )
                 _log(f"  Deleted: {ds.name}")
             except Exception as e:
                 _log(f"  Failed to delete {ds.name}: {e}")

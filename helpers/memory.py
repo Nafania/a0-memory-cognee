@@ -16,6 +16,7 @@ from enum import Enum
 from agent import Agent, AgentContext
 import models
 import logging
+from .cognee_ops import run_cognee_operation
 
 
 def _get_cognee():
@@ -190,7 +191,9 @@ class Memory:
                 for doc in entry["documents"]:
                     content = doc.page_content if hasattr(doc, "page_content") else str(doc)
                     try:
-                        await cognee.add(
+                        await run_cognee_operation(
+                            "cognee.add knowledge import",
+                            cognee.add,
                             content,
                             dataset_name=self.dataset_name,
                             node_set=[area],
@@ -261,7 +264,9 @@ class Memory:
         from cognee.modules.engine.models.node_set import NodeSet
 
         try:
-            results = await cognee.search(
+            results = await run_cognee_operation(
+                "cognee.search memory",
+                cognee.search,
                 query_text=query,
                 top_k=limit,
                 datasets=datasets,
@@ -325,7 +330,12 @@ class Memory:
                     item_hash = content_hash_id(content, self.dataset_name)
                     for data_id in list(id_set):
                         if item_hash == data_id:
-                            await cognee.forget(data_id=item.id, dataset=target.id)
+                            await run_cognee_operation(
+                                "cognee.forget memory id",
+                                cognee.forget,
+                                data_id=item.id,
+                                dataset=target.id,
+                            )
                             removed.append(Document(page_content="", metadata={"id": data_id}))
                             id_set.discard(data_id)
                             break
@@ -367,7 +377,9 @@ class Memory:
                 area = Memory.Area.MAIN.value
 
             try:
-                await cognee.add(
+                await run_cognee_operation(
+                    "cognee.add memory",
+                    cognee.add,
                     doc.page_content,
                     dataset_name=self.dataset_name,
                     node_set=[area],
@@ -723,7 +735,12 @@ async def _try_delete_direct(cognee, dataset, data_id: str) -> bool:
     try:
         import uuid
         uuid.UUID(data_id)
-        await cognee.forget(data_id=data_id, dataset=dataset.id)
+        await run_cognee_operation(
+            "cognee.forget memory direct",
+            cognee.forget,
+            data_id=data_id,
+            dataset=dataset.id,
+        )
         return True
     except (ValueError, TypeError):
         return False
@@ -755,7 +772,12 @@ async def _delete_matching_data_items(dataset_name: str, docs: list[Document]) -
             item_hash = content_hash_id(content, dataset_name)
             if item_hash in match_hashes:
                 try:
-                    await cognee.forget(data_id=item.id, dataset=target.id)
+                    await run_cognee_operation(
+                        "cognee.forget memory match",
+                        cognee.forget,
+                        data_id=item.id,
+                        dataset=target.id,
+                    )
                     deleted += 1
                 except Exception:
                     pass
@@ -780,7 +802,12 @@ async def _delete_data_by_id(dataset_name: str, data_id: str):
             content = await read_data_item_content_async(item)
             item_hash = content_hash_id(content, dataset_name)
             if item_hash == data_id:
-                await cognee.forget(data_id=item.id, dataset=target.id)
+                await run_cognee_operation(
+                    "cognee.forget memory data id",
+                    cognee.forget,
+                    data_id=item.id,
+                    dataset=target.id,
+                )
                 return True
     except Exception as e:
         PrintStyle.error(f"Failed to delete data {data_id} from {dataset_name}: {e}")
@@ -813,7 +840,12 @@ async def _batch_delete_by_ids(dataset_name: str, ids: set[str]) -> int:
                 item_hash = content_hash_id(content, dataset_name)
                 if item_hash in remaining:
                     try:
-                        await cognee.forget(data_id=item.id, dataset=target.id)
+                        await run_cognee_operation(
+                            "cognee.forget memory batch",
+                            cognee.forget,
+                            data_id=item.id,
+                            dataset=target.id,
+                        )
                         deleted += 1
                         remaining.discard(item_hash)
                     except Exception:
