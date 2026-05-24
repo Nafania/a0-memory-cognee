@@ -35,12 +35,18 @@ def _load_memory_module(tmp_dir: str, worker: FakeDirtyWorker):
     print_style = types.ModuleType("helpers.print_style")
 
     class PrintStyle:
+        def __init__(self, *args, **kwargs):
+            pass
+
         @staticmethod
         def error(*args, **kwargs):
             pass
 
         @staticmethod
         def warning(*args, **kwargs):
+            pass
+
+        def print(self, *args, **kwargs):
             pass
 
     print_style.PrintStyle = PrintStyle
@@ -287,6 +293,134 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
                         {"area": "fragments", "timestamp": "now"},
                     )
                 )
+
+    def test_update_documents_inserts_replacement_before_deleting_old_memory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+            calls = []
+
+            memory = memory_module.Memory("default", "default")
+
+            async def insert_documents(docs):
+                calls.append(("insert", [doc.page_content for doc in docs]))
+                return ["new-id"]
+
+            async def delete_documents_by_ids(ids):
+                calls.append(("delete", ids))
+                return []
+
+            memory.insert_documents = insert_documents
+            memory.delete_documents_by_ids = delete_documents_by_ids
+
+            doc = memory_module.Document(
+                page_content="new content",
+                metadata={"id": "old-id"},
+            )
+
+            result = asyncio.run(memory.update_documents([doc]))
+
+            self.assertEqual(result, ["new-id"])
+            self.assertEqual(calls, [("insert", ["new content"]), ("delete", ["old-id"])])
+
+    def test_update_documents_does_not_delete_old_memory_when_insert_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+            calls = []
+
+            memory = memory_module.Memory("default", "default")
+
+            async def insert_documents(docs):
+                calls.append(("insert", [doc.page_content for doc in docs]))
+                return []
+
+            async def delete_documents_by_ids(ids):
+                calls.append(("delete", ids))
+                return []
+
+            memory.insert_documents = insert_documents
+            memory.delete_documents_by_ids = delete_documents_by_ids
+
+            doc = memory_module.Document(
+                page_content="new content",
+                metadata={"id": "old-id"},
+            )
+
+            result = asyncio.run(memory.update_documents([doc]))
+
+            self.assertEqual(result, [])
+            self.assertEqual(calls, [("insert", ["new content"])])
+
+    def test_simple_dedup_inserts_before_deleting_similar_memory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+            calls = []
+
+            class FakeDB:
+                async def search_similarity_threshold(self, **kwargs):
+                    calls.append(("search", kwargs["query"]))
+                    return [
+                        memory_module.Document(
+                            page_content="old content",
+                            metadata={"id": "old-id"},
+                        )
+                    ]
+
+                async def insert_text(self, *, text, metadata):
+                    calls.append(("insert", text))
+                    return "new-id"
+
+                async def delete_documents_by_ids(self, ids):
+                    calls.append(("delete", ids))
+                    return []
+
+            result = asyncio.run(
+                memory_module.insert_with_simple_dedup(FakeDB(), "new content", "main", 0.9)
+            )
+
+            self.assertEqual(result, "new-id")
+            self.assertEqual(
+                calls,
+                [("search", "new content"), ("insert", "new content"), ("delete", ["old-id"])],
+            )
+
+    def test_simple_dedup_does_not_delete_similar_memory_when_insert_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+            calls = []
+
+            class FakeDB:
+                async def search_similarity_threshold(self, **kwargs):
+                    calls.append(("search", kwargs["query"]))
+                    return [
+                        memory_module.Document(
+                            page_content="old content",
+                            metadata={"id": "old-id"},
+                        )
+                    ]
+
+                async def insert_text(self, *, text, metadata):
+                    calls.append(("insert", text))
+                    raise RuntimeError("insert failed")
+
+                async def delete_documents_by_ids(self, ids):
+                    calls.append(("delete", ids))
+                    return []
+
+            with self.assertRaisesRegex(RuntimeError, "insert failed"):
+                asyncio.run(
+                    memory_module.insert_with_simple_dedup(
+                        FakeDB(),
+                        "new content",
+                        "main",
+                        0.9,
+                    )
+                )
+
+            self.assertEqual(calls, [("search", "new content"), ("insert", "new content")])
 
 
 if __name__ == "__main__":

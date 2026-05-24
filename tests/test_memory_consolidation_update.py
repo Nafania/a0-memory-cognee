@@ -137,6 +137,72 @@ class MemoryConsolidationUpdateTest(unittest.TestCase):
         self.assertEqual(ids, [])
         self.assertEqual(db.calls, [("insert", "updated memory")])
 
+    def test_merge_inserts_consolidated_memory_before_deleting_old_memories(self):
+        module = _load_consolidation_module()
+        consolidator = module.MemoryConsolidator(agent=object())
+        db = FakeDB()
+        result = module.ConsolidationResult(
+            action=module.ConsolidationAction.MERGE,
+            memories_to_remove=["old-a", "old-b"],
+            new_memory_content="merged memory",
+        )
+
+        ids = asyncio.run(consolidator._handle_merge(db, result, "main", {}, None))
+
+        self.assertEqual(ids, ["new-id"])
+        self.assertEqual(
+            db.calls,
+            [("insert", "merged memory"), ("delete", ["old-a", "old-b"])],
+        )
+
+    def test_merge_does_not_delete_old_memories_when_insert_fails(self):
+        module = _load_consolidation_module()
+        consolidator = module.MemoryConsolidator(agent=object())
+        db = FakeDB(fail_insert=True)
+        result = module.ConsolidationResult(
+            action=module.ConsolidationAction.MERGE,
+            memories_to_remove=["old-a", "old-b"],
+            new_memory_content="merged memory",
+        )
+
+        ids = asyncio.run(consolidator._handle_merge(db, result, "main", {}, None))
+
+        self.assertEqual(ids, [])
+        self.assertEqual(db.calls, [("insert", "merged memory")])
+
+    def test_replace_inserts_replacement_before_deleting_old_memories(self):
+        module = _load_consolidation_module()
+        consolidator = module.MemoryConsolidator(agent=object())
+        db = FakeDB()
+        result = module.ConsolidationResult(
+            action=module.ConsolidationAction.REPLACE,
+            memories_to_remove=["old-a"],
+            new_memory_content="replacement memory",
+        )
+
+        ids = asyncio.run(consolidator._handle_replace(db, result, "main", {}, None))
+
+        self.assertEqual(ids, ["new-id"])
+        self.assertEqual(
+            db.calls,
+            [("insert", "replacement memory"), ("delete", ["old-a"])],
+        )
+
+    def test_replace_does_not_delete_old_memory_when_insert_fails(self):
+        module = _load_consolidation_module()
+        consolidator = module.MemoryConsolidator(agent=object())
+        db = FakeDB(fail_insert=True)
+        result = module.ConsolidationResult(
+            action=module.ConsolidationAction.REPLACE,
+            memories_to_remove=["old-a"],
+            new_memory_content="replacement memory",
+        )
+
+        ids = asyncio.run(consolidator._handle_replace(db, result, "main", {}, None))
+
+        self.assertEqual(ids, [])
+        self.assertEqual(db.calls, [("insert", "replacement memory")])
+
 
 if __name__ == "__main__":
     unittest.main()

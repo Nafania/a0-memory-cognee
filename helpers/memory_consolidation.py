@@ -480,46 +480,56 @@ class MemoryConsolidator:
         original_metadata: Dict[str, Any], log_item: Optional[LogItem] = None
     ) -> list:
         """Handle MERGE action: Combine memories, remove originals, insert consolidated version."""
+        if not result.new_memory_content:
+            return []
+
+        final_metadata = {
+            'area': area,
+            'timestamp': self._get_timestamp(),
+            'consolidation_action': result.action.value,
+            'consolidated_from': result.memories_to_remove,
+            **original_metadata,
+            **result.metadata
+        }
+
+        try:
+            new_id = await db.insert_text(result.new_memory_content, final_metadata)
+        except Exception as e:
+            PrintStyle().warning(f"Failed to insert merged memory: {e}")
+            return []
+
         if result.memories_to_remove:
             await db.delete_documents_by_ids(result.memories_to_remove)
 
-        if result.new_memory_content:
-            final_metadata = {
-                'area': area,
-                'timestamp': self._get_timestamp(),
-                'consolidation_action': result.action.value,
-                'consolidated_from': result.memories_to_remove,
-                **original_metadata,
-                **result.metadata
-            }
-
-            new_id = await db.insert_text(result.new_memory_content, final_metadata)
-            return [new_id]
-        else:
-            return []
+        return [new_id]
 
     async def _handle_replace(
         self, db: Memory, result: ConsolidationResult, area: str,
         original_metadata: Dict[str, Any], log_item: Optional[LogItem] = None
     ) -> list:
         """Handle REPLACE action: Remove old memories, insert new version."""
+        if not result.new_memory_content:
+            return []
+
+        final_metadata = {
+            'area': area,
+            'timestamp': self._get_timestamp(),
+            'consolidation_action': result.action.value,
+            'replaced_memories': result.memories_to_remove,
+            **original_metadata,
+            **result.metadata
+        }
+
+        try:
+            new_id = await db.insert_text(result.new_memory_content, final_metadata)
+        except Exception as e:
+            PrintStyle().warning(f"Failed to insert replacement memory: {e}")
+            return []
+
         if result.memories_to_remove:
             await db.delete_documents_by_ids(result.memories_to_remove)
 
-        if result.new_memory_content:
-            final_metadata = {
-                'area': area,
-                'timestamp': self._get_timestamp(),
-                'consolidation_action': result.action.value,
-                'replaced_memories': result.memories_to_remove,
-                **original_metadata,
-                **result.metadata
-            }
-
-            new_id = await db.insert_text(result.new_memory_content, final_metadata)
-            return [new_id]
-        else:
-            return []
+        return [new_id]
 
     async def _handle_update(
         self, db: Memory, result: ConsolidationResult, area: str,

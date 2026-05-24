@@ -403,9 +403,13 @@ class Memory:
 
     async def update_documents(self, docs: list[Document]) -> list:
         ids = [doc.metadata.get("id", "") for doc in docs if doc.metadata.get("id")]
-        if ids:
-            await self.delete_documents_by_ids(ids)
         result = await self.insert_documents(docs)
+        if ids and result and len(result) == len(docs):
+            await self.delete_documents_by_ids(ids)
+        elif ids and result:
+            PrintStyle.warning(
+                "Memory update insert was partial; old memories were kept to avoid data loss"
+            )
         return result
 
     @staticmethod
@@ -969,17 +973,30 @@ async def insert_with_simple_dedup(
     Matches core Agent Zero behavior: delete similar old entries, then insert
     the new one. This ensures memories evolve over time instead of being frozen.
     """
+    similar_docs: list[Document] = []
     try:
         if threshold > 0:
-            removed = await db.delete_documents_by_query(
+            similar_docs = await db.search_similarity_threshold(
                 query=text,
+                limit=100,
                 threshold=threshold,
                 filter=f"area == '{area}'",
+                include_default=False,
             )
-            if removed:
-                PrintStyle(font_color="gray").print(
-                    f"Replacing {len(removed)} similar memories (area={area}): {text[:80]}..."
-                )
     except Exception:
-        pass
-    return await db.insert_text(text=text, metadata={"area": area})
+        similar_docs = []
+
+    new_id = await db.insert_text(text=text, metadata={"area": area})
+
+    ids_to_delete = [
+        doc.metadata.get("id")
+        for doc in similar_docs
+        if doc.metadata.get("id") and doc.metadata.get("id") != new_id
+    ]
+    if ids_to_delete:
+        await db.delete_documents_by_ids(ids_to_delete)
+        PrintStyle(font_color="gray").print(
+            f"Replacing {len(ids_to_delete)} similar memories (area={area}): {text[:80]}..."
+        )
+
+    return new_id
