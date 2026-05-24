@@ -5,6 +5,8 @@ import types
 import unittest
 from pathlib import Path
 
+from langchain_core.documents import Document
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -50,6 +52,23 @@ def _load_dashboard_module(captured: dict, *, node_count: int = 2):
         @staticmethod
         async def get_by_subdir(memory_subdir, preload_knowledge=False):
             return Memory(memory_subdir.replace("/", "_").replace(" ", "_").lower())
+
+        async def search_similarity_threshold(
+            self,
+            *,
+            query,
+            limit,
+            threshold,
+            filter,
+            include_default,
+        ):
+            captured["search_threshold"] = threshold
+            return [
+                Document(
+                    page_content="matched memory",
+                    metadata={"id": "memory-id", "area": "main"},
+                )
+            ]
 
     memory.Memory = Memory
     memory.get_existing_memory_subdirs = lambda: ["default", "projects/demo"]
@@ -147,6 +166,25 @@ class MemoryDashboardTest(unittest.TestCase):
         self.assertEqual(result["node_count"], 1000)
         self.assertEqual(result["total_node_count"], 1005)
         self.assertTrue(result["truncated"])
+
+    def test_search_memories_passes_default_threshold(self):
+        captured = {}
+        module = _load_dashboard_module(captured)
+        handler = module.MemoryDashboard()
+
+        result = asyncio.run(
+            handler._search_memories(
+                {
+                    "memory_subdir": "default",
+                    "search": "needle",
+                    "limit": 5,
+                }
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(captured["search_threshold"], 0.7)
+        self.assertEqual(result["memories"][0]["content_full"], "matched memory")
 
 
 if __name__ == "__main__":

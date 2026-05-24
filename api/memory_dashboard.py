@@ -9,6 +9,7 @@ from agent import AgentContext
 
 _dashboard_cache: dict[str, tuple[float, list]] = {}
 _CACHE_TTL = 60  # seconds
+_SEARCH_THRESHOLD_DEFAULT = 0.7
 _GRAPH_NODE_LIMIT_DEFAULT = 300
 _GRAPH_NODE_LIMIT_MAX = 1000
 
@@ -151,6 +152,7 @@ class MemoryDashboard(ApiHandler):
             search_query = input.get("search", "")
             limit = input.get("limit", 100)
             offset = input.get("offset", 0)
+            threshold = _coerce_search_threshold(input.get("threshold"))
 
             memory = await Memory.get_by_subdir(memory_subdir, preload_knowledge=False)
 
@@ -158,6 +160,7 @@ class MemoryDashboard(ApiHandler):
                 docs = await memory.search_similarity_threshold(
                     query=search_query,
                     limit=limit,
+                    threshold=threshold,
                     filter=f"area == '{area_filter}'" if area_filter else "",
                     include_default=False,
                 )
@@ -457,3 +460,12 @@ def _coerce_graph_node_limit(raw_limit) -> int:
     except (TypeError, ValueError):
         limit = _GRAPH_NODE_LIMIT_DEFAULT
     return max(1, min(limit, _GRAPH_NODE_LIMIT_MAX))
+
+
+def _coerce_search_threshold(raw_threshold) -> float:
+    try:
+        return float(
+            raw_threshold if raw_threshold is not None else _SEARCH_THRESHOLD_DEFAULT
+        )
+    except (TypeError, ValueError):
+        return _SEARCH_THRESHOLD_DEFAULT
