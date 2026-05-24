@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import sys
 import types
@@ -29,10 +30,20 @@ class FakeMessage:
 class FakeAgent:
     def __init__(self):
         self.history = FakeHistory()
-        self.context = types.SimpleNamespace(id="ctx-1")
+        self.context = types.SimpleNamespace(
+            id="ctx-1",
+            log=types.SimpleNamespace(log=lambda **kwargs: FakeLogItem()),
+        )
+        self._data = {}
 
     def parse_prompt(self, name, **kwargs):
         return f"{name}:{kwargs}"
+
+    def get_data(self, name):
+        return self._data.get(name)
+
+    def set_data(self, name, value):
+        self._data[name] = value
 
 
 class FakeLoopData:
@@ -283,6 +294,28 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(fake_cognee.search_calls), 1)
         self.assertIs(fake_cognee.search_calls[0]["verbose"], True)
+
+    async def test_execute_reuses_inflight_recall_task(self):
+        fake_cognee = FakeCognee()
+        split_calls = []
+        module = _load_recall_module(fake_cognee, split_calls)
+
+        extension = module.RecallMemories()
+        extension.agent = FakeAgent()
+        pending = asyncio.create_task(asyncio.sleep(1))
+        extension.agent.set_data(module.DATA_NAME_TASK, pending)
+
+        try:
+            await extension.execute(FakeLoopData())
+
+            self.assertIs(extension.agent.get_data(module.DATA_NAME_TASK), pending)
+            self.assertEqual(fake_cognee.search_calls, [])
+        finally:
+            pending.cancel()
+            try:
+                await pending
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":

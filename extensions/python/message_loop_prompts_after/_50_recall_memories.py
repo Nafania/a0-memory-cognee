@@ -25,6 +25,11 @@ class RecallMemories(Extension):
         if not cfg["memory_recall_enabled"]:
             return
 
+        existing_task = self.agent.get_data(DATA_NAME_TASK)
+        if existing_task and not existing_task.done():
+            self.agent.set_data(DATA_NAME_ITER, loop_data.iteration)
+            return
+
         if loop_data.iteration % cfg["memory_recall_interval"] == 0:
             log_item = self.agent.context.log.log(
                 type="util",
@@ -37,6 +42,7 @@ class RecallMemories(Extension):
                     timeout=SEARCH_TIMEOUT,
                 )
             )
+            task.add_done_callback(_log_unhandled_recall_exception)
         else:
             task = None
 
@@ -155,6 +161,20 @@ class RecallMemories(Extension):
         )
 
         _write_extras(self.agent, extras, memories, solutions, log_item, mem_fb + sol_fb)
+
+
+def _log_unhandled_recall_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    try:
+        exc = task.exception()
+    except Exception as e:
+        exc = e
+    if exc:
+        try:
+            PrintStyle.error(f"Memory recall task failed: {exc}")
+        except OSError:
+            pass
 
 
 def _write_extras(agent, extras, memories, solutions, log_item, feedback_items):
