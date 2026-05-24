@@ -11,10 +11,10 @@ class ReindexKnowledge(ApiHandler):
 
         mem = await memory.Memory.reload(context.agent0)
         from usr.plugins.memory_cognee.helpers.cognee_init import (
-            reset_cognify_status_for_all_datasets,
+            reset_cognify_status_for_dataset_names,
         )
 
-        await reset_cognify_status_for_all_datasets()
+        await reset_cognify_status_for_dataset_names([mem.dataset_name])
         from usr.plugins.memory_cognee.helpers.cognee_background import (
             CogneeBackgroundWorker,
         )

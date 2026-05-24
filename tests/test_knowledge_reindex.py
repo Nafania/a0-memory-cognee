@@ -45,7 +45,12 @@ def _load_reindex_module(worker: FakeWorker):
     async def reset_cognify_status_for_all_datasets():
         cognee_init.reset_calls.append("all")
 
+    async def reset_cognify_status_for_dataset_names(dataset_names):
+        cognee_init.reset_calls.append(list(dataset_names))
+        return list(dataset_names)
+
     cognee_init.reset_cognify_status_for_all_datasets = reset_cognify_status_for_all_datasets
+    cognee_init.reset_cognify_status_for_dataset_names = reset_cognify_status_for_dataset_names
 
     class Memory:
         dataset_name = "default"
@@ -106,7 +111,7 @@ class KnowledgeReindexTest(unittest.TestCase):
 
         self.assertEqual(result["ok"], True)
         cognee_init = sys.modules["usr.plugins.memory_cognee.helpers.cognee_init"]
-        self.assertEqual(cognee_init.reset_calls, ["all"])
+        self.assertEqual(cognee_init.reset_calls, [["default"]])
         self.assertEqual(worker.dirty, ["default"])
 
 
