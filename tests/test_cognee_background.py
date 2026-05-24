@@ -345,7 +345,10 @@ class CogneeBackgroundTest(unittest.TestCase):
 
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
+        scheduled_runs = []
+        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
         worker.mark_dirty("default")
+        scheduled_runs.clear()
 
         asyncio.run(worker.run_pipeline())
 
@@ -355,6 +358,7 @@ class CogneeBackgroundTest(unittest.TestCase):
             worker.get_status()["dataset_readiness"]["default"]["state"],
             "failed",
         )
+        self.assertEqual(scheduled_runs, [30.0])
 
     def test_start_is_idempotent(self):
         fake_cognee = types.ModuleType("cognee")
@@ -421,7 +425,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
         scheduled_runs = []
-        worker._schedule_run_soon = lambda: scheduled_runs.append(True)
+        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
         worker.mark_dirty("default")
         scheduled_runs.clear()
 
@@ -431,7 +435,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertFalse(status["last_run_success"])
         self.assertEqual(status["dirty_datasets"], ["default"])
         self.assertIn("graph is still empty", status["last_error"])
-        self.assertEqual(scheduled_runs, [])
+        self.assertEqual(scheduled_runs, [30.0])
 
     def test_graph_without_nodes_keeps_dataset_dirty(self):
         class FakeDatasets:

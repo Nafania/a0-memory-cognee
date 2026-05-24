@@ -30,6 +30,7 @@ class CogneeBackgroundWorker:
         self._last_run_datasets: list[str] = []
         self._last_run_success: bool = False
         self._dataset_readiness: dict[str, dict[str, object]] = {}
+        self._retry_attempts: dict[str, int] = {}
         self._task: DeferredTask | None = None
         self._state_lock = threading.RLock()
 
@@ -45,6 +46,7 @@ class CogneeBackgroundWorker:
         with self._state_lock:
             self._dirty_datasets.add(dataset_name)
             self._dirty_versions[dataset_name] = self._dirty_versions.get(dataset_name, 0) + 1
+            self._retry_attempts.pop(dataset_name, None)
             self._insert_count += 1
             self._set_dataset_state_locked(
                 dataset_name,
@@ -68,6 +70,7 @@ class CogneeBackgroundWorker:
                     dataset: dict(state)
                     for dataset, state in self._dataset_readiness.items()
                 },
+                "retry_attempts": dict(self._retry_attempts),
             }
 
     def get_search_block_reason(self, datasets: list[str]) -> str | None:
@@ -147,6 +150,8 @@ class CogneeBackgroundWorker:
             "cognify_after_n_inserts": get_cognee_setting("cognee_cognify_after_n_inserts", 10),
             "temporal_enabled": get_cognee_setting("cognee_temporal_enabled", True),
             "memify_enabled": get_cognee_setting("cognee_memify_enabled", True),
+            "retry_min_delay": get_cognee_setting("cognee_rebuild_retry_min_seconds", 30),
+            "retry_max_delay": get_cognee_setting("cognee_rebuild_retry_max_seconds", 300),
         }
 
     async def _should_run(self) -> bool:
@@ -172,6 +177,7 @@ class CogneeBackgroundWorker:
     async def run_pipeline(self) -> None:
         """Run cognify + memify on dirty datasets."""
         should_reschedule = False
+        reschedule_delay: float | None = None
         with self._state_lock:
             if self._running or not self._dirty_datasets:
                 return
@@ -207,6 +213,7 @@ class CogneeBackgroundWorker:
 
         try:
             failed_datasets: list[str] = []
+            retry_delays: list[float] = []
             for dataset in datasets:
                 try:
                     if config["temporal_enabled"]:
@@ -255,11 +262,24 @@ class CogneeBackgroundWorker:
                                 "Cognee improve completed but "
                                 f"{readiness_error} for dataset: {dataset}"
                             )
+                    with self._state_lock:
+                        self._retry_attempts.pop(dataset, None)
                 except Exception as e:
                     failed_datasets.append(dataset)
                     with self._state_lock:
+                        attempt = self._retry_attempts.get(dataset, 0) + 1
+                        self._retry_attempts[dataset] = attempt
+                        retry_delay = min(
+                            float(config["retry_max_delay"]),
+                            float(config["retry_min_delay"]) * (2 ** (attempt - 1)),
+                        )
+                        retry_delays.append(retry_delay)
                         self._last_error = str(e)
-                        self._set_dataset_state_locked(dataset, "failed", str(e))
+                        self._set_dataset_state_locked(
+                            dataset,
+                            "failed",
+                            f"{e}; retry scheduled in {retry_delay:.0f}s",
+                        )
                     PrintStyle.error(f"Cognee pipeline failed for dataset {dataset}", str(e))
 
             with self._state_lock:
@@ -282,7 +302,8 @@ class CogneeBackgroundWorker:
                         )
 
                 if failed_datasets:
-                    should_reschedule = False
+                    should_reschedule = bool(self._dirty_datasets)
+                    reschedule_delay = max(retry_delays) if retry_delays else None
                     self._last_run_success = False
                 elif self._dirty_datasets:
                     should_reschedule = True
@@ -299,12 +320,13 @@ class CogneeBackgroundWorker:
                 for dataset in self._last_run_datasets:
                     self._set_dataset_state_locked(dataset, "failed", str(e))
                 should_reschedule = False
+                reschedule_delay = None
             PrintStyle.error("Cognee pipeline failed", str(e))
         finally:
             with self._state_lock:
                 self._running = False
             if should_reschedule:
-                self._schedule_run_soon()
+                self._schedule_run_soon(reschedule_delay)
 
     async def maybe_run_pipeline(self) -> None:
         """Check if pipeline should run based on thresholds, then run if so."""
@@ -334,13 +356,14 @@ class CogneeBackgroundWorker:
             self._task = task
             return task
 
-    def _schedule_run_soon(self) -> None:
+    def _schedule_run_soon(self, delay: float | None = None) -> None:
         """Debounce a near-immediate rebuild from the current event loop."""
         with self._state_lock:
             if self._run_scheduled or self._running:
                 return
             self._run_scheduled = True
-            delay = float(get_cognee_setting("cognee_cognify_debounce_seconds", 2))
+            if delay is None:
+                delay = float(get_cognee_setting("cognee_cognify_debounce_seconds", 2))
             task = self._task
 
         loop = getattr(getattr(task, "event_loop_thread", None), "loop", None)
