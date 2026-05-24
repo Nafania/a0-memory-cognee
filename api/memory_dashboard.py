@@ -1,7 +1,7 @@
 import time as _time
 
 from helpers.api import ApiHandler, Request, Response
-from usr.plugins.memory_cognee.helpers.memory import Memory, get_existing_memory_subdirs, get_context_memory_subdir, read_data_item_content, parse_node_set_area
+from usr.plugins.memory_cognee.helpers.memory import Memory, get_existing_memory_subdirs, get_context_memory_subdir, read_data_item_content, read_data_item_content_async, parse_node_set_area
 from helpers import files
 from helpers.print_style import PrintStyle
 from langchain_core.documents import Document
@@ -207,7 +207,7 @@ class MemoryDashboard(ApiHandler):
                         PrintStyle.error(f"[MemoryDashboard] Failed to list data for '{ds.name}': {e}")
                         continue
                     for item in data_items:
-                        text = self.read_data_item_content(item)
+                        text = await self.read_data_item_content_async(item)
                         meta = {}
                         meta["id"] = str(getattr(item, "id", "")) or content_hash_id(text, ds.name)
                         meta["area"] = parse_node_set_area(getattr(item, "node_set", None))
@@ -267,6 +267,10 @@ class MemoryDashboard(ApiHandler):
     @staticmethod
     def read_data_item_content(item) -> str:
         return read_data_item_content(item)
+
+    @staticmethod
+    async def read_data_item_content_async(item) -> str:
+        return await read_data_item_content_async(item)
 
     def _format_memory_for_dashboard(self, m: Document) -> dict:
         metadata = m.metadata

@@ -78,7 +78,16 @@ def _load_dashboard_module(captured: dict, *, node_count: int = 2):
     memory.Memory = Memory
     memory.get_existing_memory_subdirs = lambda: ["default", "projects/demo"]
     memory.get_context_memory_subdir = lambda context: "default"
-    memory.read_data_item_content = lambda item: ""
+    def read_data_item_content(item):
+        raise AssertionError("sync content reader should not be used")
+
+    async def read_data_item_content_async(item):
+        captured["async_content_reader_used"] = True
+        return "async memory"
+
+    memory.read_data_item_content = read_data_item_content
+    memory.read_data_item_content_async = read_data_item_content_async
+    memory.content_hash_id = lambda content, dataset_name="": f"hash-{dataset_name}"
     memory.parse_node_set_area = lambda raw: "main"
 
     graph_module = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_graph")
@@ -101,13 +110,29 @@ def _load_dashboard_module(captured: dict, *, node_count: int = 2):
 
     graph_module.read_dataset_graphs = read_dataset_graphs
 
+    class FakeDatasets:
+        async def list_datasets(self):
+            return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+        async def list_data(self, dataset_id):
+            return [
+                types.SimpleNamespace(
+                    id="data-id",
+                    node_set='["main"]',
+                    created_at="2026-05-24 00:00:00",
+                )
+            ]
+
+    fake_cognee = types.ModuleType("cognee")
+    fake_cognee.datasets = FakeDatasets()
+
     sys.modules.update(
         {
             "helpers.api": helpers_api,
             "helpers.files": files,
             "helpers.print_style": print_style,
             "agent": types.SimpleNamespace(AgentContext=object),
-            "cognee": types.ModuleType("cognee"),
+            "cognee": fake_cognee,
             "usr.plugins.memory_cognee.helpers.memory": memory,
             "usr.plugins.memory_cognee.helpers.cognee_graph": graph_module,
         }
@@ -215,6 +240,24 @@ class MemoryDashboardTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(captured["updated_content"], "edited memory")
         self.assertEqual(captured["updated_metadata"]["id"], "original-id")
+
+    def test_list_memories_uses_async_content_reader(self):
+        captured = {}
+        module = _load_dashboard_module(captured)
+        handler = module.MemoryDashboard()
+
+        result = asyncio.run(
+            handler._search_memories(
+                {
+                    "memory_subdir": "default",
+                    "limit": 10,
+                }
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(captured["async_content_reader_used"])
+        self.assertEqual(result["memories"][0]["content_full"], "async memory")
 
 
 if __name__ == "__main__":
