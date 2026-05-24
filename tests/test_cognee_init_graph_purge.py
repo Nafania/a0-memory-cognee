@@ -341,6 +341,55 @@ class CogneeInitStartupTest(unittest.TestCase):
                 else:
                     sys.modules[name] = old_module
 
+    def test_create_db_tables_continues_after_lancedb_optimize_failure(self):
+        cognee_init = _load_cognee_init_module()
+
+        run_migrations_module = types.ModuleType("cognee.run_migrations")
+
+        async def run_startup_migrations():
+            return None
+
+        run_migrations_module.run_startup_migrations = run_startup_migrations
+        old_run_migrations = sys.modules.get("cognee.run_migrations")
+        sys.modules["cognee.run_migrations"] = run_migrations_module
+
+        reached_detection = {"value": False}
+
+        async def optimize():
+            raise RuntimeError("locked LanceDB table")
+
+        async def detect():
+            reached_detection["value"] = True
+            return set()
+
+        original_lancedb = cognee_init._patch_lancedb_migration_defaults
+        original_sync = cognee_init._sync_missing_columns
+        original_rewrite = cognee_init._rewrite_legacy_data_storage_locations
+        original_quarantine = cognee_init._quarantine_missing_data_files
+        original_optimize = cognee_init._optimize_fragmented_lancedb_tables
+        original_detect = cognee_init._detect_datasets_with_unready_graphs
+        cognee_init._patch_lancedb_migration_defaults = lambda: None
+        cognee_init._sync_missing_columns = lambda: None
+        cognee_init._rewrite_legacy_data_storage_locations = lambda: None
+        cognee_init._quarantine_missing_data_files = lambda: None
+        cognee_init._optimize_fragmented_lancedb_tables = optimize
+        cognee_init._detect_datasets_with_unready_graphs = detect
+        try:
+            asyncio.run(cognee_init._create_db_tables())
+        finally:
+            cognee_init._patch_lancedb_migration_defaults = original_lancedb
+            cognee_init._sync_missing_columns = original_sync
+            cognee_init._rewrite_legacy_data_storage_locations = original_rewrite
+            cognee_init._quarantine_missing_data_files = original_quarantine
+            cognee_init._optimize_fragmented_lancedb_tables = original_optimize
+            cognee_init._detect_datasets_with_unready_graphs = original_detect
+            if old_run_migrations is None:
+                sys.modules.pop("cognee.run_migrations", None)
+            else:
+                sys.modules["cognee.run_migrations"] = old_run_migrations
+
+        self.assertTrue(reached_detection["value"])
+
     def test_detects_dataset_with_data_but_empty_graph(self):
         cognee_init = _load_cognee_init_module()
 

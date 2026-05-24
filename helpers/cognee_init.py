@@ -339,7 +339,13 @@ async def _create_db_tables():
     _sync_missing_columns()
     _rewrite_legacy_data_storage_locations()
     _quarantine_missing_data_files()
-    await _optimize_fragmented_lancedb_tables()
+    try:
+        await _optimize_fragmented_lancedb_tables()
+    except Exception as e:
+        PrintStyle.error(
+            "LanceDB optimization failed during startup; continuing Cognee init "
+            f"with degraded search risk: {e}"
+        )
     affected_datasets = await _detect_datasets_with_unready_graphs()
     if affected_datasets:
         await _reset_cognify_status_for_datasets(affected_datasets)
