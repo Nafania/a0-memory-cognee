@@ -13,6 +13,7 @@ import logging
 import os
 import asyncio
 import uuid
+import threading
 from typing import Any, Callable
 
 from helpers import files
@@ -21,6 +22,8 @@ from helpers.settings import get_settings
 _log = logging.getLogger(__name__)
 
 _UNSET = object()
+_DRAIN_LOCK = threading.Lock()
+_DRAIN_TASK: asyncio.Task | None = None
 
 VALID_FEEDBACK = frozenset({"positive", "negative"})
 MAX_RETRY_ATTEMPTS = 5
@@ -218,55 +221,102 @@ async def drain_feedback_queue(
     """
     Attempt to deliver pending queue entries. Returns count successfully forwarded.
     """
-    if cognee_module is _UNSET:
-        try:
-            from .cognee_init import get_cognee
-
-            cognee_module, _ = get_cognee()
-        except Exception:
-            cognee_module = None
-
-    pdir = _pending_dir()
-    if not os.path.isdir(pdir):
+    if not _DRAIN_LOCK.acquire(blocking=False):
         return 0
-    names = sorted(f for f in os.listdir(pdir) if f.endswith(".json"))
-    forwarded = 0
-    for name in names[: max(0, limit)]:
-        path = os.path.join(pdir, name)
-        try:
-            with open(path, encoding="utf-8") as f:
-                record = json.load(f)
-            validate_feedback_payload(record)
-        except Exception as e:
-            _log.warning("cognee_feedback invalid queue file=%s err=%s", path, e)
-            _quarantine_invalid_queue_file(path, str(e))
-            continue
-        ok = await _try_forward(cognee_module, record)
-        if ok is True:
+    try:
+        if cognee_module is _UNSET:
             try:
-                os.remove(path)
-            except OSError:
-                pass
-            forwarded += 1
-            continue
-        if ok is False:
-            attempts = int(record.get("attempts", 0)) + 1
-            if attempts >= MAX_RETRY_ATTEMPTS:
-                _quarantine_invalid_queue_file(
-                    path, f"max_retries_exceeded:{attempts}"
-                )
+                from .cognee_init import get_cognee
+
+                cognee_module, _ = get_cognee()
+            except Exception:
+                cognee_module = None
+
+        pdir = _pending_dir()
+        if not os.path.isdir(pdir):
+            return 0
+        names = sorted(f for f in os.listdir(pdir) if f.endswith(".json"))
+        forwarded = 0
+        for name in names[: max(0, limit)]:
+            path = os.path.join(pdir, name)
+            claim_path = path + ".processing"
+            try:
+                os.replace(path, claim_path)
+            except FileNotFoundError:
                 continue
-            record["attempts"] = attempts
+            except OSError as e:
+                _log.warning("cognee_feedback could not claim queue file=%s err=%s", path, e)
+                continue
             try:
-                _rewrite_pending_record(path, record)
+                with open(claim_path, encoding="utf-8") as f:
+                    record = json.load(f)
+                validate_feedback_payload(record)
             except Exception as e:
-                _log.warning(
-                    "cognee_feedback could not persist attempts path=%s attempts=%s err=%s",
-                    path,
-                    attempts,
-                    e,
-                )
-    return forwarded
+                _log.warning("cognee_feedback invalid queue file=%s err=%s", claim_path, e)
+                _quarantine_invalid_queue_file(claim_path, str(e))
+                continue
+            ok = await _try_forward(cognee_module, record)
+            if ok is True:
+                try:
+                    os.remove(claim_path)
+                except OSError:
+                    pass
+                forwarded += 1
+                continue
+            if ok is False:
+                attempts = int(record.get("attempts", 0)) + 1
+                if attempts >= MAX_RETRY_ATTEMPTS:
+                    _quarantine_invalid_queue_file(
+                        claim_path, f"max_retries_exceeded:{attempts}"
+                    )
+                    continue
+                record["attempts"] = attempts
+                try:
+                    _rewrite_pending_record(claim_path, record)
+                    os.replace(claim_path, path)
+                except Exception as e:
+                    _log.warning(
+                        "cognee_feedback could not persist attempts path=%s attempts=%s err=%s",
+                        path,
+                        attempts,
+                        e,
+                    )
+            else:
+                try:
+                    os.replace(claim_path, path)
+                except OSError as e:
+                    _log.warning(
+                        "cognee_feedback could not release unforwarded file=%s err=%s",
+                        path,
+                        e,
+                    )
+        return forwarded
+    finally:
+        _DRAIN_LOCK.release()
+
+
+def _schedule_feedback_drain(cognee_module: Any, limit: int) -> None:
+    global _DRAIN_TASK
+    try:
+        if _DRAIN_TASK is not None and not _DRAIN_TASK.done():
+            return
+        _DRAIN_TASK = asyncio.create_task(
+            drain_feedback_queue(cognee_module=cognee_module, limit=limit)
+        )
+        _DRAIN_TASK.add_done_callback(_log_drain_task_exception)
+    except Exception as e:
+        _log.debug("cognee_feedback background drain scheduling skipped err=%s", e)
+
+
+def _log_drain_task_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    try:
+        exc = task.exception()
+    except Exception as e:
+        exc = e
+    if exc:
+        _log.warning("cognee_feedback background drain failed err=%s", exc)
 
 
 async def submit_memory_feedback(
@@ -275,10 +325,7 @@ async def submit_memory_feedback(
 ) -> dict[str, Any]:
     validate_feedback_payload(payload)
 
-    try:
-        asyncio.create_task(drain_feedback_queue(cognee_module=cognee_module, limit=20))
-    except Exception as e:
-        _log.debug("cognee_feedback background drain scheduling skipped err=%s", e)
+    _schedule_feedback_drain(cognee_module, 20)
 
     settings = get_settings()
     if not settings.get("cognee_feedback_enabled", True):
