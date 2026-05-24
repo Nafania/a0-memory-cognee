@@ -29,6 +29,11 @@ def _load_consolidation_module():
 
     memory.Memory = Memory
 
+    class SearchUnavailable(RuntimeError):
+        pass
+
+    memory.SearchUnavailable = SearchUnavailable
+
     llm_json = types.ModuleType("usr.plugins.memory_cognee.helpers.llm_json")
     llm_json.parse_llm_json_response = lambda *args, **kwargs: {}
 
@@ -238,6 +243,32 @@ class MemoryConsolidationUpdateTest(unittest.TestCase):
         self.assertNotIn("node_name", db.insert_metadata[0])
         self.assertEqual(db.insert_metadata[0]["safe"], "kept")
         self.assertEqual(db.insert_metadata[0]["source"], "original")
+
+    def test_find_similar_memories_requests_unavailable_search_errors(self):
+        module = _load_consolidation_module()
+        consolidator = module.MemoryConsolidator(agent=object())
+        captured = []
+
+        class FakeDB:
+            async def search_similarity_threshold(self, **kwargs):
+                captured.append(kwargs)
+                return []
+
+        async def get_memory(agent):
+            return FakeDB()
+
+        async def no_keywords(new_memory, log_item):
+            return []
+
+        module.Memory.get = get_memory
+        consolidator._extract_search_keywords = no_keywords
+
+        result = asyncio.run(
+            consolidator._find_similar_memories("new memory", "main", None)
+        )
+
+        self.assertEqual(result, [])
+        self.assertEqual(captured[0]["raise_unavailable"], True)
 
 
 if __name__ == "__main__":

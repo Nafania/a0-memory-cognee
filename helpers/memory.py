@@ -19,6 +19,10 @@ import logging
 from .cognee_ops import run_cognee_operation
 
 
+class SearchUnavailable(RuntimeError):
+    pass
+
+
 def _get_cognee():
     from .cognee_init import get_cognee
     return get_cognee()
@@ -249,6 +253,7 @@ class Memory:
     async def search_similarity_threshold(
         self, query: str, limit: int, threshold: float, filter: str = "",
         include_default: bool = True, session_id: str | None = None,
+        raise_unavailable: bool = False,
     ) -> list[Document]:
         node_names = _parse_filter_to_node_names(filter)
         datasets = self.get_search_datasets() if include_default else [self.dataset_name]
@@ -258,6 +263,8 @@ class Memory:
         block_reason = worker.get_search_block_reason(datasets)
         if block_reason:
             PrintStyle.warning(f"cognee.search skipped: {block_reason}")
+            if raise_unavailable:
+                raise SearchUnavailable(block_reason)
             return []
 
         cognee, SearchType = _get_cognee()
@@ -279,6 +286,8 @@ class Memory:
             )
         except Exception as e:
             PrintStyle.error(f"cognee.search failed: {e}")
+            if raise_unavailable:
+                raise SearchUnavailable(f"cognee.search failed: {e}") from e
             return []
 
         if not results:

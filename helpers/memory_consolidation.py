@@ -7,7 +7,7 @@ from enum import Enum
 
 from langchain_core.documents import Document
 
-from .memory import Memory
+from .memory import Memory, SearchUnavailable
 from .llm_json import parse_llm_json_response
 from helpers.dirty_json import DirtyJson
 from helpers.log import LogItem
@@ -275,7 +275,8 @@ class MemoryConsolidator:
             query=new_memory,
             limit=self.config.max_similar_memories,
             threshold=self.config.similarity_threshold,
-            filter=f"area == '{area}'"
+            filter=f"area == '{area}'",
+            raise_unavailable=True,
         )
         all_similar.extend(semantic_similar)
 
@@ -286,7 +287,8 @@ class MemoryConsolidator:
                     query=query.strip(),
                     limit=max(3, self.config.max_similar_memories // queries_count),
                     threshold=self.config.similarity_threshold,
-                    filter=f"area == '{area}'"
+                    filter=f"area == '{area}'",
+                    raise_unavailable=True,
                 )
                 all_similar.extend(keyword_similar)
 

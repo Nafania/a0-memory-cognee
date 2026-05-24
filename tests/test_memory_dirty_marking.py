@@ -196,6 +196,29 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
 
             self.assertEqual(docs, [])
 
+    def test_search_can_raise_when_rebuild_not_ready(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            worker.block_reason = "Cognee memory graph rebuild pending for dataset(s): ['default']"
+            memory_module = _load_memory_module(tmp_dir, worker)
+            memory_module._get_cognee = lambda: (_ for _ in ()).throw(
+                AssertionError("cognee should not be loaded while rebuild blocks search")
+            )
+
+            memory = memory_module.Memory("default", "default")
+            with self.assertRaisesRegex(
+                memory_module.SearchUnavailable,
+                "Cognee memory graph rebuild pending",
+            ):
+                asyncio.run(
+                    memory.search_similarity_threshold(
+                        query="test",
+                        limit=5,
+                        threshold=0.7,
+                        raise_unavailable=True,
+                    )
+                )
+
     def test_similarity_search_keeps_verbose_result_shape_for_metadata(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker = FakeDirtyWorker()
