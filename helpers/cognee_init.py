@@ -1075,6 +1075,11 @@ def run_memory_cognee_init_a0_extension() -> None:
     try:
         configure_cognee()
         asyncio.run(init_cognee())
+        from . import faiss_migration
+
+        migrated = asyncio.run(faiss_migration.run_migration())
+        if not migrated:
+            PrintStyle.warning("FAISS -> Cognee migration did not complete; will retry on next startup")
         from .cognee_background import CogneeBackgroundWorker
 
         CogneeBackgroundWorker.get_instance().start()
