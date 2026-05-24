@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 import importlib.util
 import sys
 import threading
@@ -358,6 +359,35 @@ class CogneeBackgroundTest(unittest.TestCase):
             worker.get_status()["dataset_readiness"]["default"]["state"],
             "failed",
         )
+        self.assertEqual(scheduled_runs, [30.0])
+
+    def test_cognee_import_failure_marks_dataset_failed_for_retry(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        scheduled_runs = []
+        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker.mark_dirty("default")
+        scheduled_runs.clear()
+        original_import = builtins.__import__
+
+        def failing_import(name, *args, **kwargs):
+            if name == "cognee":
+                raise ImportError("forced cognee import failure")
+            return original_import(name, *args, **kwargs)
+
+        try:
+            builtins.__import__ = failing_import
+            asyncio.run(worker.run_pipeline())
+        finally:
+            builtins.__import__ = original_import
+
+        status = worker.get_status()
+        self.assertFalse(status["running"])
+        self.assertFalse(status["last_run_success"])
+        self.assertEqual(status["dataset_readiness"]["default"]["state"], "failed")
+        self.assertIn("Cognee import failed", status["last_error"])
+        self.assertIn("default", status["dirty_datasets"])
         self.assertEqual(scheduled_runs, [30.0])
 
     def test_hung_cognify_times_out_and_unblocks_rebuild_state(self):

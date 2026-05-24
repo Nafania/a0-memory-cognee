@@ -94,6 +94,8 @@ class MemorizeMemories(Extension):
                     replace_similarity_threshold=replace_threshold,
                 )
                 memory_ids = []
+                skipped_unavailable = 0
+                unavailable_reason = ""
                 for memory in memories:
                     txt = f"{memory}"
                     result = await consolidator.process_new_memory(
@@ -102,14 +104,30 @@ class MemorizeMemories(Extension):
                         metadata={"area": area},
                         log_item=log_item,
                     )
+                    if result.get("search_unavailable"):
+                        skipped_unavailable += 1
+                        unavailable_reason = result.get("reason", unavailable_reason)
                     memory_ids.extend(result.get("memory_ids", []))
             else:
                 memory_ids = []
+                skipped_unavailable = 0
+                unavailable_reason = ""
                 for memory in memories:
                     txt = f"{memory}"
                     memory_id = await insert_with_simple_dedup(db, txt, area, replace_threshold)
                     if memory_id:
                         memory_ids.append(memory_id)
+
+            if skipped_unavailable and not memory_ids:
+                log_item.update(
+                    result=(
+                        f"{skipped_unavailable} entries skipped; memory search unavailable: "
+                        f"{unavailable_reason}"
+                    ),
+                    heading=f"{skipped_unavailable} entries skipped; memory unavailable.",
+                    memory_ids=[],
+                )
+                return
 
             log_item.update(
                 result=f"{len(memories)} entries memorized.",

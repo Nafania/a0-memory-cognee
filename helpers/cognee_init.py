@@ -1,6 +1,8 @@
 import os
 import logging
 import importlib
+import threading
+import asyncio
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -56,6 +58,8 @@ _EMBED_DIMENSIONS: dict[str, int] = {
 _configured = False
 _init_done = False
 _init_error: BaseException | None = None
+_init_running = False
+_init_condition = threading.Condition(threading.RLock())
 _cognee_module = None
 _search_type_class = None
 
@@ -800,13 +804,21 @@ async def _detect_datasets_with_unready_graphs() -> set[str]:
             dataset_id = str(getattr(graph, "dataset_id", "") or "")
             dataset_name = str(getattr(graph, "dataset_name", "") or dataset_id)
             data_count = getattr(graph, "data_count", None)
-            if data_count is not None and data_count <= 0:
+            if data_count is None:
+                PrintStyle.warning(
+                    f"Could not confirm Cognee dataset '{dataset_name}' data count; "
+                    "skipping startup graph reset"
+                )
+                continue
+            if data_count <= 0:
                 continue
 
             graph_error = getattr(graph, "error", None)
             graph_empty = getattr(graph, "graph_empty", None)
-            nodes = getattr(graph, "nodes", []) or []
-            is_unready = bool(graph_error) or graph_empty is True or not nodes
+            if graph_empty is False and not graph_error:
+                continue
+
+            is_unready = bool(graph_error) or graph_empty is True
             if is_unready and dataset_id:
                 unready_dataset_ids.add(dataset_id)
                 detail = f": {graph_error}" if graph_error else ""
@@ -870,20 +882,21 @@ async def _reset_cognify_status_for_datasets(
             f"Graph will rebuild on next cognify()."
         )
 
-    try:
-        from .cognee_background import CogneeBackgroundWorker
+    if reset_count or reset_all:
+        try:
+            from .cognee_background import CogneeBackgroundWorker
 
-        worker = CogneeBackgroundWorker.get_instance()
-        for name in dataset_names:
-            worker.mark_dirty(name)
-        if dataset_names:
-            PrintStyle.standard(
-                f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild: {dataset_names}"
+            worker = CogneeBackgroundWorker.get_instance()
+            for name in dataset_names:
+                worker.mark_dirty(name)
+            if dataset_names:
+                PrintStyle.standard(
+                    f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild: {dataset_names}"
+                )
+        except Exception as e:
+            PrintStyle.warning(
+                f"Could not mark datasets dirty (graph will rebuild on next insert instead): {e}"
             )
-    except Exception as e:
-        PrintStyle.warning(
-            f"Could not mark datasets dirty (graph will rebuild on next insert instead): {e}"
-        )
 
 
 async def reset_cognify_status_for_dataset_names(dataset_names: list[str]) -> list[str]:
@@ -988,7 +1001,7 @@ async def _delete_pipeline_runs_for_dataset_ids(dataset_ids: list) -> int:
         PrintStyle.standard(
             f"Reset pipeline status metadata for {data_reset_count} data item(s)."
         )
-    return len(dataset_ids) if deleted else 0
+    return len(dataset_ids) if deleted or data_reset_count else 0
 
 
 def _sync_missing_columns():
@@ -1049,21 +1062,47 @@ def _sync_missing_columns():
 
 async def init_cognee() -> None:
     """One-time startup initialization. Idempotent — safe to call multiple times."""
-    global _init_done, _init_error
-    if _init_done:
-        return
+    global _init_done, _init_error, _init_running
+    while True:
+        with _init_condition:
+            if _init_done:
+                return
+            if _init_error is not None and not _init_running:
+                raise RuntimeError(
+                    f"Cognee initialization failed: {_init_error}"
+                ) from _init_error
+            if not _init_running:
+                _init_running = True
+                _init_error = None
+                break
+
+        await asyncio.to_thread(_wait_for_init_result)
+
     try:
-        _init_error = None
         configure_cognee()
         if _cognee_module is None:
             raise RuntimeError("Cognee configure failed: module was not loaded")
         await _create_db_tables()
-        _init_done = True
-        PrintStyle.standard("Cognee fully initialized")
+        PrintStyle.standard("Cognee core initialized")
     except BaseException as e:
-        _init_done = False
-        _init_error = e
+        with _init_condition:
+            _init_done = False
+            _init_error = e
+            _init_running = False
+            _init_condition.notify_all()
         raise
+    else:
+        with _init_condition:
+            _init_done = True
+            _init_error = None
+            _init_running = False
+            _init_condition.notify_all()
+
+
+def _wait_for_init_result() -> None:
+    with _init_condition:
+        while _init_running:
+            _init_condition.wait()
 
 
 def ensure_tables_sync() -> None:
@@ -1113,7 +1152,7 @@ def run_memory_cognee_init_a0_extension() -> None:
     """Entry for Agent Zero `init_a0` / `end` extensions.
 
     Upstream `run_ui.run()` calls `init_a0()` before starting the server; extension
-    folders are `_functions/<run_ui.init_a0.__module__>/init_a0/end/` per
+    folders are `_functions/<run_ui.init_a0.__module__>/init_a0/start/` per
     `helpers.extension.extensible` (see agent0ai/agent-zero). Official Docker starts
     `python run_ui.py`, so `__module__` is usually `__main__`; if `run_ui` is imported
     as a module, use the duplicate extension under `_functions/run_ui/...`.
@@ -1130,7 +1169,16 @@ def run_memory_cognee_init_a0_extension() -> None:
             PrintStyle.warning("FAISS -> Cognee migration did not complete; will retry on next startup")
         from .cognee_background import CogneeBackgroundWorker
 
-        CogneeBackgroundWorker.get_instance().start()
+        worker = CogneeBackgroundWorker.get_instance()
+        status = worker.get_status()
+        dirty_datasets = list(status.get("dirty_datasets") or [])
+        if dirty_datasets:
+            PrintStyle.warning(
+                "Cognee memory graph rebuild required before recall; "
+                f"background rebuild pending for dataset(s): {dirty_datasets}"
+            )
+
+        worker.start()
     except BaseException as e:
         # BaseException: asyncio.run() re-raises SystemExit from run_migrations
         PrintStyle.error(f"Cognee eager init failed ({type(e).__name__}): {e}")

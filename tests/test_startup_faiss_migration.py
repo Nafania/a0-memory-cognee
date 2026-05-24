@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 import sys
 import types
 import unittest
@@ -8,7 +9,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load_cognee_init_module(order: list[str]):
+def _load_cognee_init_module(
+    order: list[str],
+    dirty_datasets: list[str] | None = None,
+):
     helpers = types.ModuleType("helpers")
     dotenv = types.ModuleType("helpers.dotenv")
     files = types.ModuleType("helpers.files")
@@ -48,10 +52,21 @@ def _load_cognee_init_module(order: list[str]):
 
     background = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_background")
 
+    dirty_datasets = dirty_datasets or []
+
     class CogneeBackgroundWorker:
         @staticmethod
         def get_instance():
-            return types.SimpleNamespace(start=lambda: order.append("start"))
+            async def run_pipeline():
+                order.append("rebuild")
+                dirty_datasets.clear()
+
+            return types.SimpleNamespace(
+                get_status=lambda: {"dirty_datasets": list(dirty_datasets)},
+                run_pipeline=run_pipeline,
+                mark_dirty=lambda dataset_name: order.append(f"dirty:{dataset_name}"),
+                start=lambda: order.append("start"),
+            )
 
     background.CogneeBackgroundWorker = CogneeBackgroundWorker
 
@@ -111,6 +126,64 @@ class StartupFaissMigrationTest(unittest.TestCase):
         module.run_memory_cognee_init_a0_extension()
 
         self.assertEqual(order, ["configure", "init", "migrate", "start"])
+
+    def test_init_a0_starts_worker_without_synchronous_rebuild(self):
+        order: list[str] = []
+        module = _load_cognee_init_module(order, dirty_datasets=["default"])
+
+        module.configure_cognee = lambda: order.append("configure")
+
+        async def init_cognee():
+            order.append("init")
+
+        module.init_cognee = init_cognee
+
+        module.run_memory_cognee_init_a0_extension()
+
+        self.assertEqual(order, ["configure", "init", "migrate", "start"])
+
+    def test_init_extension_runs_before_agent_zero_components(self):
+        base = REPO_ROOT / "extensions" / "python" / "_functions"
+
+        self.assertTrue(
+            (base / "__main__" / "init_a0" / "start" / "_20_init_cognee.py").exists()
+        )
+        self.assertTrue(
+            (base / "run_ui" / "init_a0" / "start" / "_20_init_cognee.py").exists()
+        )
+        self.assertFalse(
+            (base / "__main__" / "init_a0" / "end" / "_20_init_cognee.py").exists()
+        )
+        self.assertFalse(
+            (base / "run_ui" / "init_a0" / "end" / "_20_init_cognee.py").exists()
+        )
+
+    def test_reset_cognify_status_does_not_mark_dirty_without_reset(self):
+        order: list[str] = []
+        module = _load_cognee_init_module(order)
+
+        fake_cognee = types.ModuleType("cognee")
+
+        class Datasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+        fake_cognee.datasets = Datasets()
+        async def delete_pipeline_runs(dataset_ids):
+            return 0
+
+        module._delete_pipeline_runs_for_dataset_ids = delete_pipeline_runs
+        old_cognee = sys.modules.get("cognee")
+        sys.modules["cognee"] = fake_cognee
+        try:
+            asyncio.run(module._reset_cognify_status_for_datasets({"dataset-id"}))
+        finally:
+            if old_cognee is None:
+                sys.modules.pop("cognee", None)
+            else:
+                sys.modules["cognee"] = old_cognee
+
+        self.assertNotIn("dirty:default", order)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from helpers import llm_json
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CONSOLIDATION_RESULTS = None
 
 
 class FakeLogItem:
@@ -37,6 +38,8 @@ class FakeConsolidator:
 
     async def process_new_memory(self, **kwargs):
         self.index += 1
+        if CONSOLIDATION_RESULTS is not None:
+            return CONSOLIDATION_RESULTS[self.index - 1]
         return {"success": True, "memory_ids": [f"mem-{self.index}"]}
 
 
@@ -123,6 +126,18 @@ def _load_memorize_memories_module():
 
 
 class MemorizeLoggingTest(unittest.IsolatedAsyncioTestCase):
+    def tearDown(self):
+        global CONSOLIDATION_RESULTS
+        CONSOLIDATION_RESULTS = None
+        for name in list(sys.modules):
+            if (
+                name == "helpers"
+                or name.startswith("helpers.")
+                or name == "agent"
+                or name.startswith("usr.plugins.memory_cognee")
+            ):
+                sys.modules.pop(name, None)
+
     async def test_logs_normalized_json_and_all_memory_ids(self):
         module = _load_memorize_memories_module()
         extension = module.MemorizeMemories()
@@ -142,6 +157,41 @@ class MemorizeLoggingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(log_item.fields["content"], '[\n  "one",\n  "two"\n]')
         self.assertEqual(log_item.fields["memory_ids"], ["mem-1", "mem-2"])
+
+    async def test_search_unavailable_consolidation_is_not_logged_as_memorized(self):
+        global CONSOLIDATION_RESULTS
+        CONSOLIDATION_RESULTS = [
+            {
+                "success": False,
+                "memory_ids": [],
+                "search_unavailable": True,
+                "reason": "Cognee memory graph rebuild running",
+            },
+            {
+                "success": False,
+                "memory_ids": [],
+                "search_unavailable": True,
+                "reason": "Cognee memory graph rebuild running",
+            },
+        ]
+        module = _load_memorize_memories_module()
+        extension = module.MemorizeMemories()
+        extension.agent = FakeAgent()
+        log_item = FakeLogItem()
+
+        await extension.memorize(
+            {},
+            log_item,
+            db=None,
+            cfg={
+                "memory_memorize_consolidation": True,
+                "memory_memorize_replace_threshold": 0.9,
+                "memory_recall_similarity_threshold": 0.7,
+            },
+        )
+
+        self.assertIn("skipped", log_item.fields["heading"])
+        self.assertNotEqual(log_item.fields["heading"], "2 entries memorized.")
 
 
 if __name__ == "__main__":

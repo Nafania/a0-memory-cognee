@@ -54,11 +54,14 @@ class FakeLoopData:
 
 
 class FakeCognee:
-    def __init__(self):
+    def __init__(self, search_error=None):
         self.search_calls = []
+        self.search_error = search_error
 
     async def search(self, **kwargs):
         self.search_calls.append(kwargs)
+        if self.search_error:
+            raise self.search_error
         return ["combined-results"]
 
 
@@ -278,9 +281,43 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(split_calls, [])
         self.assertEqual(
             log_item.fields["heading"],
-            "Memory rebuild in progress; skipping recall",
+            "Memory rebuild pending; skipping recall",
         )
         self.assertIn("Cognee memory graph rebuild pending", log_item.fields["content"])
+        self.assertEqual(loop_data.extras_persistent, {})
+
+    async def test_recall_uses_failed_heading_for_failed_rebuild(self):
+        fake_cognee = FakeCognee()
+        split_calls = []
+        module = _load_recall_module(
+            fake_cognee,
+            split_calls,
+            "Cognee memory graph rebuild failed for dataset(s): ['default']",
+        )
+
+        extension = module.RecallMemories()
+        extension.agent = FakeAgent()
+        log_item = FakeLogItem()
+
+        await extension.search_memories(log_item, FakeLoopData())
+
+        self.assertEqual(log_item.fields["heading"], "Memory rebuild failed; skipping recall")
+        self.assertIn("Cognee memory graph rebuild failed", log_item.fields["content"])
+
+    async def test_recall_search_exception_is_not_reported_as_empty_memory(self):
+        fake_cognee = FakeCognee(RuntimeError("search backend down"))
+        split_calls = []
+        module = _load_recall_module(fake_cognee, split_calls)
+
+        extension = module.RecallMemories()
+        extension.agent = FakeAgent()
+        log_item = FakeLogItem()
+        loop_data = FakeLoopData()
+
+        await extension.search_memories(log_item, loop_data)
+
+        self.assertEqual(log_item.fields["heading"], "Memory recall failed")
+        self.assertIn("search backend down", log_item.fields["content"])
         self.assertEqual(loop_data.extras_persistent, {})
 
     async def test_recall_keeps_verbose_result_shape_for_metadata(self):

@@ -276,13 +276,24 @@ class CogneeBackgroundWorker:
         try:
             import cognee
         except Exception as e:
+            config = self._get_config()
+            retry_delay = float(config["retry_min_delay"])
             with self._state_lock:
-                self._last_error = f"Cognee import failed: {e}"
+                error = f"Cognee import failed: {e}"
+                self._last_error = error
+                self._last_run_success = False
+                for dataset in datasets:
+                    self._dirty_datasets.add(dataset)
+                    self._set_dataset_state_locked(
+                        dataset,
+                        "failed",
+                        f"{error}; retry scheduled in {retry_delay:.0f}s",
+                    )
                 self._running = False
                 should_reschedule = bool(self._dirty_datasets)
             PrintStyle.error(f"Cognee background: cognee import failed: {e}")
             if should_reschedule:
-                self._schedule_run_soon()
+                self._schedule_run_soon(retry_delay)
             return
 
         try:
@@ -492,7 +503,9 @@ def _is_empty_graph_improve_error(error: Exception) -> bool:
 
 async def _verify_cognify_ready(cognee, datasets: list[str]) -> str:
     """Return an error reason if cognify did not produce a readable graph."""
-    dataset_graphs = await read_dataset_graphs(
+    dataset_graphs = await run_cognee_operation(
+        "cognee.graph readiness",
+        read_dataset_graphs,
         cognee,
         datasets,
         skip_empty_data=False,

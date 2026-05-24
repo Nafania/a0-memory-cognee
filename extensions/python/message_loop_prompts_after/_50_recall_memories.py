@@ -85,7 +85,7 @@ class RecallMemories(Extension):
         )
         if block_reason:
             log_item.update(
-                heading="Memory rebuild in progress; skipping recall",
+                heading=_recall_block_heading(block_reason),
                 content=block_reason,
             )
             return
@@ -125,13 +125,21 @@ class RecallMemories(Extension):
                 PrintStyle.error(f"cognee.search OS error (likely too many open files): {e}")
             except OSError:
                 pass
-            mem_answers, sol_answers = [], []
+            log_item.update(
+                heading="Memory recall failed",
+                content=f"cognee.search OS error: {e}",
+            )
+            return
         except Exception as e:
             try:
                 PrintStyle.error(f"cognee.search failed: {e}")
             except OSError:
                 pass
-            mem_answers, sol_answers = [], []
+            log_item.update(
+                heading="Memory recall failed",
+                content=f"cognee.search failed: {e}",
+            )
+            return
 
         if not mem_answers and not sol_answers:
             from usr.plugins.memory_cognee.helpers.cognee_background import (
@@ -161,6 +169,17 @@ class RecallMemories(Extension):
         )
 
         _write_extras(self.agent, extras, memories, solutions, log_item, mem_fb + sol_fb)
+
+
+def _recall_block_heading(block_reason: str) -> str:
+    reason = (block_reason or "").lower()
+    if "failed" in reason:
+        return "Memory rebuild failed; skipping recall"
+    if "pending" in reason:
+        return "Memory rebuild pending; skipping recall"
+    if "stale" in reason:
+        return "Memory rebuild stale; skipping recall"
+    return "Memory rebuild in progress; skipping recall"
 
 
 def _log_unhandled_recall_exception(task: asyncio.Task) -> None:
