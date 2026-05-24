@@ -52,6 +52,7 @@ _EMBED_DIMENSIONS: dict[str, int] = {
 
 _configured = False
 _init_done = False
+_init_error: BaseException | None = None
 _cognee_module = None
 _search_type_class = None
 
@@ -228,7 +229,7 @@ def configure_cognee() -> None:
         import traceback
         PrintStyle.error(f"Cognee import failed — memory features will not work: {e}")
         PrintStyle.error(traceback.format_exc())
-        return
+        raise RuntimeError(f"Cognee import failed: {e}") from e
 
     _cognee_module = cognee
     _search_type_class = SearchType
@@ -333,7 +334,7 @@ async def _create_db_tables():
             await create_db_and_tables()
         except Exception as e:
             PrintStyle.error(f"Cognee DB table creation failed: {e}")
-            return
+            raise RuntimeError(f"Cognee DB table creation failed: {e}") from e
 
     _sync_missing_columns()
     _rewrite_legacy_data_storage_locations()
@@ -1016,13 +1017,21 @@ def _sync_missing_columns():
 
 async def init_cognee() -> None:
     """One-time startup initialization. Idempotent — safe to call multiple times."""
-    global _init_done
+    global _init_done, _init_error
     if _init_done:
         return
-    configure_cognee()
-    await _create_db_tables()
-    _init_done = True
-    PrintStyle.standard("Cognee fully initialized")
+    try:
+        _init_error = None
+        configure_cognee()
+        if _cognee_module is None:
+            raise RuntimeError("Cognee configure failed: module was not loaded")
+        await _create_db_tables()
+        _init_done = True
+        PrintStyle.standard("Cognee fully initialized")
+    except BaseException as e:
+        _init_done = False
+        _init_error = e
+        raise
 
 
 def ensure_tables_sync() -> None:
@@ -1043,9 +1052,11 @@ def ensure_tables_sync() -> None:
             asyncio.run(init_cognee())
         except BaseException as e:
             PrintStyle.error(f"ensure_tables_sync (asyncio.run): {type(e).__name__}: {e}")
+            raise
         return
 
     import threading
+    errors: list[BaseException] = []
 
     def _run():
         loop = asyncio.new_event_loop()
@@ -1053,12 +1064,17 @@ def ensure_tables_sync() -> None:
             loop.run_until_complete(init_cognee())
         except BaseException as e:
             PrintStyle.error(f"ensure_tables_sync (thread): {type(e).__name__}: {e}")
+            errors.append(e)
         finally:
             loop.close()
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     t.join(timeout=60)
+    if t.is_alive():
+        raise TimeoutError("Cognee initialization did not finish within 60 seconds")
+    if errors:
+        raise RuntimeError(f"Cognee initialization failed: {errors[0]}") from errors[0]
 
 
 def run_memory_cognee_init_a0_extension() -> None:
@@ -1094,6 +1110,10 @@ def get_cognee():
         configure_cognee()
     if not _init_done:
         ensure_tables_sync()
+    if _init_error is not None:
+        raise RuntimeError(f"Cognee initialization failed: {_init_error}") from _init_error
+    if not _init_done:
+        raise RuntimeError("Cognee initialization did not complete")
     if _cognee_module is None:
         raise RuntimeError("Cognee could not be initialized — check logs for details")
     return _cognee_module, _search_type_class

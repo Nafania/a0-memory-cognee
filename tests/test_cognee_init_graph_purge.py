@@ -291,6 +291,56 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         self.assertTrue(fake_engine.disposed)
 
+    def test_init_does_not_mark_done_when_configure_does_not_load_cognee(self):
+        cognee_init = _load_cognee_init_module()
+        cognee_init.configure_cognee = lambda: None
+
+        async def create_tables():
+            return None
+
+        cognee_init._create_db_tables = create_tables
+
+        with self.assertRaisesRegex(RuntimeError, "Cognee configure failed"):
+            asyncio.run(cognee_init.init_cognee())
+
+        self.assertFalse(cognee_init._init_done)
+
+    def test_create_db_tables_raises_when_migration_and_fallback_fail(self):
+        cognee_init = _load_cognee_init_module()
+
+        run_migrations_module = types.ModuleType("cognee.run_migrations")
+
+        async def run_startup_migrations():
+            raise SystemExit(1)
+
+        run_migrations_module.run_startup_migrations = run_startup_migrations
+
+        relational_module = types.ModuleType("cognee.infrastructure.databases.relational")
+
+        async def create_db_and_tables():
+            raise RuntimeError("fallback failed")
+
+        relational_module.create_db_and_tables = create_db_and_tables
+
+        old_modules = {
+            name: sys.modules.get(name)
+            for name in (
+                "cognee.run_migrations",
+                "cognee.infrastructure.databases.relational",
+            )
+        }
+        sys.modules["cognee.run_migrations"] = run_migrations_module
+        sys.modules["cognee.infrastructure.databases.relational"] = relational_module
+        try:
+            with self.assertRaisesRegex(RuntimeError, "Cognee DB table creation failed"):
+                asyncio.run(cognee_init._create_db_tables())
+        finally:
+            for name, old_module in old_modules.items():
+                if old_module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = old_module
+
     def test_detects_dataset_with_data_but_empty_graph(self):
         cognee_init = _load_cognee_init_module()
 
