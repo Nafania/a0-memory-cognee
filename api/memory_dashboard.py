@@ -9,6 +9,8 @@ from agent import AgentContext
 
 _dashboard_cache: dict[str, tuple[float, list]] = {}
 _CACHE_TTL = 60  # seconds
+_GRAPH_NODE_LIMIT_DEFAULT = 300
+_GRAPH_NODE_LIMIT_MAX = 1000
 
 
 def invalidate_dashboard_cache():
@@ -325,14 +327,10 @@ class MemoryDashboard(ApiHandler):
             import cognee
             from usr.plugins.memory_cognee.helpers.cognee_graph import read_dataset_graphs
 
-            node_limit = int(input.get("node_limit", 300))
-            dataset_filter = input.get("datasets")
-            if isinstance(dataset_filter, str):
-                dataset_names = [dataset_filter]
-            elif isinstance(dataset_filter, list):
-                dataset_names = [str(name) for name in dataset_filter if name]
-            else:
-                dataset_names = None
+            node_limit = _coerce_graph_node_limit(input.get("node_limit"))
+            memory_subdir = input.get("memory_subdir", "default")
+            memory = await Memory.get_by_subdir(memory_subdir, preload_knowledge=False)
+            dataset_names = [memory.dataset_name]
 
             dataset_graphs = await read_dataset_graphs(
                 cognee,
@@ -451,3 +449,11 @@ class MemoryDashboard(ApiHandler):
             PrintStyle.error(f"[MemoryDashboard] Graph data retrieval failed: {e}")
             traceback.print_exc()
             return {"success": False, "error": str(e), "nodes": [], "edges": []}
+
+
+def _coerce_graph_node_limit(raw_limit) -> int:
+    try:
+        limit = int(raw_limit if raw_limit is not None else _GRAPH_NODE_LIMIT_DEFAULT)
+    except (TypeError, ValueError):
+        limit = _GRAPH_NODE_LIMIT_DEFAULT
+    return max(1, min(limit, _GRAPH_NODE_LIMIT_MAX))
