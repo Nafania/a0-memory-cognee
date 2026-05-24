@@ -815,10 +815,16 @@ async def _detect_datasets_with_unready_graphs() -> set[str]:
 
             graph_error = getattr(graph, "error", None)
             graph_empty = getattr(graph, "graph_empty", None)
+            if graph_error:
+                PrintStyle.warning(
+                    f"Could not verify Cognee dataset '{dataset_name}' graph during "
+                    f"startup; leaving pipeline status unchanged: {graph_error}"
+                )
+                continue
             if graph_empty is False and not graph_error:
                 continue
 
-            is_unready = bool(graph_error) or graph_empty is True
+            is_unready = graph_empty is True
             if is_unready and dataset_id:
                 unready_dataset_ids.add(dataset_id)
                 detail = f": {graph_error}" if graph_error else ""

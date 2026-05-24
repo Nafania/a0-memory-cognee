@@ -430,14 +430,47 @@ async def run_migration(dry_run: bool = False, verify: bool = False, force: bool
 
         if needs_rerun:
             state = {"version": 1, "indices": {}, "completed": False}
-            save_state(base_dir, state)
+            if not dry_run:
+                save_state(base_dir, state)
         else:
             _log(f"FAISS->Cognee migration already complete. Data dir: {state.get('data_dir', 'unknown')}")
-            await cleanup_backup_datasets(base_dir)
-            return True
+            if dry_run:
+                return True
+            cleanup_needs_verification = bool(
+                state.get("cleanup_v2_done")
+                and not state.get("cleanup_v2_verified_done")
+            )
+            if state.get("cleanup_v2_pending") and state.get("cleanup_v2_reimported"):
+                await cleanup_backup_datasets(base_dir)
+                cleanup_state = load_state(base_dir)
+                return bool(cleanup_state.get("cleanup_v2_verified_done"))
+            cleanup_pending_before = bool(state.get("cleanup_v2_pending"))
+            cleanup_changed = await cleanup_backup_datasets(base_dir, delete=False)
+            if not cleanup_changed:
+                cleanup_state = load_state(base_dir)
+                if cleanup_pending_before and cleanup_state.get("cleanup_v2_pending"):
+                    return False
+                if (
+                    cleanup_needs_verification
+                    and not cleanup_state.get("cleanup_v2_verified_done")
+                ):
+                    return False
+                return True
+            state = load_state(base_dir)
+            if state.get("completed"):
+                return True
 
     indices = find_faiss_indices(base_dir)
     if not indices:
+        if state.get("cleanup_v2_pending"):
+            _log(
+                "Cleanup requires FAISS reimport, but no FAISS indices were found. "
+                "Keeping existing Cognee datasets and retrying cleanup on next startup."
+            )
+            state["completed"] = True
+            if not dry_run:
+                save_state(base_dir, state)
+            return False
         _log("No FAISS indices found. Nothing to migrate.")
         state["completed"] = True
         state["data_dir"] = current_dir
@@ -481,7 +514,14 @@ async def run_migration(dry_run: bool = False, verify: bool = False, force: bool
         _log("\nBacking up FAISS directories...")
         backup_completed_indices(indices, state)
 
+        if not state.get("cleanup_v2_verified_done"):
+            state["cleanup_v2_pending"] = True
+            state["cleanup_v2_reimported"] = True
+            save_state(base_dir, state)
+
         await cleanup_backup_datasets(base_dir)
+        cleanup_state = load_state(base_dir)
+        cleanup_complete = bool(cleanup_state.get("cleanup_v2_verified_done"))
 
         if verify:
             await run_cognify(indices)
@@ -496,10 +536,12 @@ async def run_migration(dry_run: bool = False, verify: bool = False, force: bool
             _log(f"\nWARNING: Partial migration for: {partial}")
             _log("Re-run to continue from where it left off.")
 
+    if all_complete and not dry_run:
+        return bool(cleanup_complete)
     return all_complete
 
 
-async def cleanup_backup_datasets(base_dir: str):
+async def cleanup_backup_datasets(base_dir: str, *, delete: bool = True) -> bool:
     """Remove duplicate/wrongly-named datasets from earlier buggy runs.
 
     Cleans up:
@@ -507,8 +549,8 @@ async def cleanup_backup_datasets(base_dir: str):
     - *_main, *_fragments, *_solutions datasets (old per-area naming bug)
     """
     state = load_state(base_dir)
-    if state.get("cleanup_v2_done"):
-        return
+    if state.get("cleanup_v2_done") and state.get("cleanup_v2_verified_done"):
+        return False
 
     _AREA_SUFFIXES = ("_main", "_fragments", "_solutions")
 
@@ -523,9 +565,32 @@ async def cleanup_backup_datasets(base_dir: str):
         ]
         if not to_delete:
             state["cleanup_v2_done"] = True
+            state["cleanup_v2_verified_done"] = True
+            state.pop("cleanup_v2_pending", None)
+            state.pop("cleanup_v2_reimported", None)
             save_state(base_dir, state)
-            return
+            return False
+
+        if state.get("cleanup_v2_done"):
+            _log(
+                "Cleanup was marked done, but wrongly-named Cognee dataset(s) still "
+                "exist. Revalidating cleanup."
+            )
+
+        if not delete:
+            _log(
+                f"\nFound {len(to_delete)} wrongly-named Cognee dataset(s). "
+                "Will reimport FAISS data before deleting them."
+            )
+            _mark_cleanup_reimport_pending(state)
+            save_state(base_dir, state)
+            return True
+
         _log(f"\nCleaning up {len(to_delete)} wrongly-named datasets...")
+        state["cleanup_v2_pending"] = True
+        state.pop("cleanup_v2_done", None)
+        state.pop("cleanup_v2_verified_done", None)
+        failures = []
         for ds in to_delete:
             try:
                 await run_cognee_operation(
@@ -535,20 +600,41 @@ async def cleanup_backup_datasets(base_dir: str):
                 )
                 _log(f"  Deleted: {ds.name}")
             except Exception as e:
+                failures.append(ds.name)
                 _log(f"  Failed to delete {ds.name}: {e}")
 
-        # Force re-migration so data goes to correctly-named datasets
-        for key in list(state.get("indices", {}).keys()):
-            idx_state = state["indices"][key]
-            if idx_state.get("status") == "complete":
-                idx_state["status"] = "pending"
-                idx_state["migrated_doc_ids"] = []
-                _log(f"  Reset migration state for: {key}")
-        state["completed"] = False
+        if failures:
+            _log(
+                "  Cleanup incomplete; old datasets will be retried on next startup: "
+                f"{failures}"
+            )
+            save_state(base_dir, state)
+            return False
+
         state["cleanup_v2_done"] = True
+        state["cleanup_v2_verified_done"] = True
+        state.pop("cleanup_v2_pending", None)
+        state.pop("cleanup_v2_reimported", None)
         save_state(base_dir, state)
+        return True
     except Exception as e:
         _log(f"  Cleanup error (non-fatal): {e}")
+        return False
+
+
+def _mark_cleanup_reimport_pending(state: dict) -> None:
+    """Force re-migration so data lands in correctly-named datasets before cleanup."""
+    for key in list(state.get("indices", {}).keys()):
+        idx_state = state["indices"][key]
+        if idx_state.get("status") == "complete":
+            idx_state["status"] = "pending"
+            idx_state["migrated_doc_ids"] = []
+            _log(f"  Reset migration state for: {key}")
+    state["completed"] = False
+    state["cleanup_v2_pending"] = True
+    state["cleanup_v2_reimported"] = False
+    state.pop("cleanup_v2_done", None)
+    state.pop("cleanup_v2_verified_done", None)
 
 
 def migrate():

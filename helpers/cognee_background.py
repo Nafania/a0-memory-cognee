@@ -31,6 +31,7 @@ class CogneeBackgroundWorker:
         self._last_run_success: bool = False
         self._dataset_readiness: dict[str, dict[str, object]] = {}
         self._retry_attempts: dict[str, int] = {}
+        self._needs_pipeline_reset: Set[str] = set()
         self._task: DeferredTask | None = None
         self._state_lock = threading.RLock()
 
@@ -41,12 +42,13 @@ class CogneeBackgroundWorker:
                 cls._instance = cls()
         return cls._instance
 
-    def mark_dirty(self, dataset_name: str) -> None:
+    def mark_dirty(self, dataset_name: str, *, reset_retry: bool = True) -> None:
         """Mark a dataset as having new data."""
         with self._state_lock:
             self._dirty_datasets.add(dataset_name)
             self._dirty_versions[dataset_name] = self._dirty_versions.get(dataset_name, 0) + 1
-            self._retry_attempts.pop(dataset_name, None)
+            if reset_retry:
+                self._retry_attempts.pop(dataset_name, None)
             self._insert_count += 1
             self._set_dataset_state_locked(
                 dataset_name,
@@ -72,6 +74,7 @@ class CogneeBackgroundWorker:
                     for dataset, state in self._dataset_readiness.items()
                 },
                 "retry_attempts": dict(self._retry_attempts),
+                "pipeline_reset_datasets": sorted(self._needs_pipeline_reset),
             }
 
     def get_search_block_reason(self, datasets: list[str]) -> str | None:
@@ -150,17 +153,21 @@ class CogneeBackgroundWorker:
 
                 if self._running:
                     detail = (
-                        "worker still reports running; not scheduling parallel retry"
+                        "worker still reports running; stale running flag cleared "
+                        "and retry scheduled"
                     )
+                    self._running = False
                 else:
                     detail = "retry scheduled"
-                    should_schedule_retry = True
+                self._run_scheduled = False
+                should_schedule_retry = True
 
                 reason = (
                     "Cognee memory graph rebuild state is stale "
                     f"after {age_seconds:.0f}s ({detail})"
                 )
                 self._dirty_datasets.add(dataset)
+                self._needs_pipeline_reset.add(dataset)
                 self._last_error = reason
                 self._last_run_success = False
                 self._set_dataset_state_locked(dataset, "failed", reason)
@@ -189,6 +196,7 @@ class CogneeBackgroundWorker:
                 f"retry scheduled in {retry_delay:.0f}s"
             )
             self._dirty_datasets.add(dataset)
+            self._needs_pipeline_reset.add(dataset)
             self._last_error = reason
             self._last_run_success = False
             self._set_dataset_state_locked(dataset, "failed", reason)
@@ -196,24 +204,20 @@ class CogneeBackgroundWorker:
         return unfinished
 
     def nudge_rebuild_if_unready(self, datasets: list[str], reason: str = "") -> bool:
-        """Schedule a rebuild when search runs before any clean cognify pass."""
-        with self._state_lock:
-            if self._last_run_success or self._running:
-                return False
+        """Legacy empty-search hook.
 
+        Empty search results are not enough to prove a graph is stale, so this
+        intentionally does not schedule rebuilds. Startup graph checks and
+        explicit dirty marks own rebuild state.
+        """
         clean_datasets = [dataset for dataset in datasets if dataset]
         if not clean_datasets:
             return False
 
-        for dataset in clean_datasets:
-            self.mark_dirty(dataset)
-
-        detail = f": {reason}" if reason else ""
-        PrintStyle.warning(
-            f"Cognee graph search returned no context before a successful rebuild; "
-            f"scheduled cognify for {clean_datasets}{detail}"
-        )
-        return True
+        with self._state_lock:
+            if self._running:
+                return False
+        return False
 
     def _get_config(self) -> dict:
         """Load cognee-related settings."""
@@ -264,6 +268,11 @@ class CogneeBackgroundWorker:
                 for dataset in datasets
             }
             self._last_run_datasets = datasets
+            dataset_states = {
+                dataset: dict(self._dataset_readiness.get(dataset, {}))
+                for dataset in datasets
+            }
+            pipeline_reset_datasets = set(self._needs_pipeline_reset)
             for dataset in datasets:
                 self._set_dataset_state_locked(
                     dataset,
@@ -301,6 +310,16 @@ class CogneeBackgroundWorker:
             retry_delays: list[float] = []
             for dataset in datasets:
                 try:
+                    previous_state = str(
+                        dataset_states.get(dataset, {}).get("state") or ""
+                    )
+                    needs_pipeline_reset = (
+                        previous_state == "failed"
+                        or dataset in pipeline_reset_datasets
+                    )
+                    if needs_pipeline_reset:
+                        await _reset_pipeline_status_for_rebuild(dataset)
+
                     if config["temporal_enabled"]:
                         await run_cognee_operation(
                             "cognee.cognify background",
@@ -355,6 +374,7 @@ class CogneeBackgroundWorker:
                 except Exception as e:
                     failed_datasets.append(dataset)
                     with self._state_lock:
+                        self._needs_pipeline_reset.add(dataset)
                         attempt = self._retry_attempts.get(dataset, 0) + 1
                         self._retry_attempts[dataset] = attempt
                         retry_delay = min(
@@ -377,6 +397,7 @@ class CogneeBackgroundWorker:
                     if self._dirty_versions.get(dataset, 0) == dataset_versions.get(dataset):
                         self._dirty_datasets.discard(dataset)
                         self._dirty_versions.pop(dataset, None)
+                        self._needs_pipeline_reset.discard(dataset)
                         self._set_dataset_state_locked(
                             dataset,
                             "ready",
@@ -406,6 +427,7 @@ class CogneeBackgroundWorker:
                 self._last_error = str(e)
                 self._last_run_success = False
                 for dataset in self._last_run_datasets:
+                    self._needs_pipeline_reset.add(dataset)
                     self._set_dataset_state_locked(dataset, "failed", str(e))
                 should_reschedule = False
                 reschedule_delay = None
@@ -530,21 +552,33 @@ async def _verify_cognify_ready(cognee, datasets: list[str]) -> str:
     if not relevant_graphs:
         return ""
 
-    if any(graph.nodes for graph in relevant_graphs):
+    if any(graph.graph_empty is False for graph in relevant_graphs):
         return ""
 
     dataset_issue = _describe_graph_dataset_results(relevant_graphs)
-    if any(graph.graph_empty is False for graph in relevant_graphs):
-        PrintStyle.warning(
-            "Cognee dataset graph is not empty according to is_empty(), but get_graph_data() "
-            f"returned no readable nodes. {dataset_issue}"
-        )
-        return "graph has no readable nodes"
+    if any(graph.nodes for graph in relevant_graphs):
+        return ""
 
     PrintStyle.warning(
         f"Cognee graph is still empty after cognify. {dataset_issue}"
     )
     return "graph is still empty"
+
+
+async def _reset_pipeline_status_for_rebuild(dataset: str) -> None:
+    """Clear Cognee pipeline status before retrying a failed rebuild."""
+    try:
+        from .cognee_init import reset_cognify_status_for_dataset_names
+
+        reset = await reset_cognify_status_for_dataset_names([dataset])
+        if reset:
+            PrintStyle.standard(
+                f"Reset Cognee pipeline status before rebuild retry: {reset}"
+            )
+    except Exception as e:
+        PrintStyle.warning(
+            f"Could not reset Cognee pipeline status before rebuild retry for {dataset}: {e}"
+        )
 
 
 def _describe_graph_dataset_results(dataset_graphs: list) -> str:

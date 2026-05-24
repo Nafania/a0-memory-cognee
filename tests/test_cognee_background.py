@@ -270,15 +270,37 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertTrue(status["last_run_success"])
         self.assertEqual(status["dirty_datasets"], [])
 
-    def test_empty_search_can_nudge_rebuild_before_first_successful_run(self):
+    def test_empty_search_does_not_nudge_unknown_dataset(self):
         fake_cognee = types.ModuleType("cognee")
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
 
         nudged = worker.nudge_rebuild_if_unready(["default"], "empty graph")
 
-        self.assertTrue(nudged)
-        self.assertEqual(worker.get_status()["dirty_datasets"], ["default"])
+        self.assertFalse(nudged)
+        self.assertEqual(worker.get_status()["dirty_datasets"], [])
+
+    def test_empty_search_does_not_nudge_ready_dataset_after_other_failure(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        with worker._state_lock:
+            worker._last_run_success = False
+            worker._set_dataset_state_locked(
+                "default",
+                "ready",
+                "Cognee memory graph rebuild completed",
+            )
+            worker._set_dataset_state_locked(
+                "projects_alpha",
+                "failed",
+                "Cognee memory graph rebuild failed",
+            )
+
+        nudged = worker.nudge_rebuild_if_unready(["default"], "empty graph")
+
+        self.assertFalse(nudged)
+        self.assertEqual(worker.get_status()["dirty_datasets"], [])
 
     def test_dirty_dataset_blocks_search_until_successful_rebuild(self):
         class FakeDatasets:
@@ -360,6 +382,85 @@ class CogneeBackgroundTest(unittest.TestCase):
             "failed",
         )
         self.assertEqual(scheduled_runs, [30.0])
+
+    def test_failed_rebuild_resets_pipeline_status_before_retry(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+
+        async def cognify(*, datasets, temporal_cognify):
+            return None
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        fake_cognee.datasets = FakeDatasets()
+        _install_graph_engine_stub(is_empty=True)
+
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        worker._schedule_run_soon = lambda delay=None: None
+        worker.mark_dirty("default")
+        asyncio.run(worker.run_pipeline())
+
+        reset_calls = []
+
+        async def reset_pipeline_status(dataset):
+            reset_calls.append(dataset)
+
+        background._reset_pipeline_status_for_rebuild = reset_pipeline_status
+        asyncio.run(worker.run_pipeline())
+
+        self.assertEqual(reset_calls, ["default"])
+
+    def test_failed_rebuild_reset_survives_new_dirty_mark(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+
+        async def cognify(*, datasets, temporal_cognify):
+            return None
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        fake_cognee.datasets = FakeDatasets()
+        _install_graph_engine_stub(is_empty=True)
+
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        worker._schedule_run_soon = lambda delay=None: None
+        worker.mark_dirty("default")
+        asyncio.run(worker.run_pipeline())
+
+        worker.mark_dirty("default")
+        self.assertEqual(
+            worker.get_status()["dataset_readiness"]["default"]["state"],
+            "dirty",
+        )
+        reset_calls = []
+
+        async def reset_pipeline_status(dataset):
+            reset_calls.append(dataset)
+
+        background._reset_pipeline_status_for_rebuild = reset_pipeline_status
+        asyncio.run(worker.run_pipeline())
+
+        self.assertEqual(reset_calls, ["default"])
 
     def test_cognee_import_failure_marks_dataset_failed_for_retry(self):
         fake_cognee = types.ModuleType("cognee")
@@ -477,6 +578,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         scheduled_runs.clear()
         with worker._state_lock:
             worker._running = True
+            worker._run_scheduled = True
             worker._set_dataset_state_locked(
                 "default",
                 "rebuilding",
@@ -490,7 +592,11 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertIn("Cognee memory graph rebuild failed", reason)
         self.assertEqual(status["dataset_readiness"]["default"]["state"], "failed")
         self.assertIn("stale", status["dataset_readiness"]["default"]["reason"])
-        self.assertEqual(scheduled_runs, [])
+        self.assertFalse(status["running"])
+        self.assertFalse(worker._run_scheduled)
+        self.assertIn("default", status["dirty_datasets"])
+        self.assertEqual(status["pipeline_reset_datasets"], ["default"])
+        self.assertEqual(scheduled_runs, [30.0])
 
     def test_start_is_idempotent(self):
         fake_cognee = types.ModuleType("cognee")
@@ -569,7 +675,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertIn("graph is still empty", status["last_error"])
         self.assertEqual(scheduled_runs, [30.0])
 
-    def test_graph_without_nodes_keeps_dataset_dirty(self):
+    def test_non_empty_graph_without_exported_nodes_marks_ready(self):
         class FakeDatasets:
             async def list_datasets(self):
                 return [types.SimpleNamespace(id="dataset-id", name="default")]
@@ -597,9 +703,9 @@ class CogneeBackgroundTest(unittest.TestCase):
         asyncio.run(worker.run_pipeline())
 
         status = worker.get_status()
-        self.assertFalse(status["last_run_success"])
-        self.assertEqual(status["dirty_datasets"], ["default"])
-        self.assertIn("graph has no readable nodes", status["last_error"])
+        self.assertTrue(status["last_run_success"])
+        self.assertEqual(status["dirty_datasets"], [])
+        self.assertIsNone(status["last_error"])
 
     def test_graph_emptied_after_improve_keeps_dataset_dirty(self):
         class FakeDatasets:

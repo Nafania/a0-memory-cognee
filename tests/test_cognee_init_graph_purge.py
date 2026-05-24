@@ -511,6 +511,50 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         self.assertEqual(unready, set())
 
+    def test_unready_detection_ignores_graph_read_error(self):
+        cognee_init = _load_cognee_init_module()
+
+        dataset_id = "00afc710-2c0c-5d61-957e-c452672842ae"
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = types.SimpleNamespace()
+        fake_graph_module = types.ModuleType(
+            "usr.plugins.memory_cognee.helpers.cognee_graph"
+        )
+
+        async def read_dataset_graphs(cognee, dataset_names=None, **kwargs):
+            return [
+                types.SimpleNamespace(
+                    dataset_id=dataset_id,
+                    dataset_name="default",
+                    data_count=1,
+                    nodes=[],
+                    edges=[],
+                    graph_empty=None,
+                    error="database is locked",
+                )
+            ]
+
+        fake_graph_module.read_dataset_graphs = read_dataset_graphs
+        old_cognee = sys.modules.get("cognee")
+        old_graph = sys.modules.get("usr.plugins.memory_cognee.helpers.cognee_graph")
+        sys.modules["cognee"] = fake_cognee
+        sys.modules["usr.plugins.memory_cognee.helpers.cognee_graph"] = fake_graph_module
+        try:
+            unready = asyncio.run(cognee_init._detect_datasets_with_unready_graphs())
+        finally:
+            if old_cognee is None:
+                sys.modules.pop("cognee", None)
+            else:
+                sys.modules["cognee"] = old_cognee
+            if old_graph is None:
+                sys.modules.pop("usr.plugins.memory_cognee.helpers.cognee_graph", None)
+            else:
+                sys.modules[
+                    "usr.plugins.memory_cognee.helpers.cognee_graph"
+                ] = old_graph
+
+        self.assertEqual(unready, set())
+
     def test_unready_detection_accepts_non_empty_graph_without_exported_nodes(self):
         cognee_init = _load_cognee_init_module()
 
