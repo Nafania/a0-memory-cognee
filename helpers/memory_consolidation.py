@@ -60,6 +60,17 @@ class MemoryAnalysisContext:
     existing_metadata: Dict[str, Any]
 
 
+_RESERVED_METADATA_KEYS = {"area", "id", "node_set", "node_name"}
+
+
+def _without_reserved_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in (metadata or {}).items()
+        if key not in _RESERVED_METADATA_KEYS
+    }
+
+
 class MemoryConsolidator:
     """
     Intelligent memory consolidation system that uses LLM analysis to determine
@@ -464,13 +475,12 @@ class MemoryConsolidator:
         if not result.new_memory_content:
             return []
 
-        final_metadata = {
-            'area': area,
-            'timestamp': self._get_timestamp(),
-            'consolidation_action': result.action.value,
-            **original_metadata,
-            **result.metadata
-        }
+        final_metadata = self._build_metadata(
+            area,
+            result.action.value,
+            original_metadata,
+            result.metadata,
+        )
 
         new_id = await db.insert_text(result.new_memory_content, final_metadata)
         return [new_id]
@@ -483,14 +493,13 @@ class MemoryConsolidator:
         if not result.new_memory_content:
             return []
 
-        final_metadata = {
-            'area': area,
-            'timestamp': self._get_timestamp(),
-            'consolidation_action': result.action.value,
-            'consolidated_from': result.memories_to_remove,
-            **original_metadata,
-            **result.metadata
-        }
+        final_metadata = self._build_metadata(
+            area,
+            result.action.value,
+            original_metadata,
+            result.metadata,
+            {'consolidated_from': result.memories_to_remove},
+        )
 
         try:
             new_id = await db.insert_text(result.new_memory_content, final_metadata)
@@ -511,14 +520,13 @@ class MemoryConsolidator:
         if not result.new_memory_content:
             return []
 
-        final_metadata = {
-            'area': area,
-            'timestamp': self._get_timestamp(),
-            'consolidation_action': result.action.value,
-            'replaced_memories': result.memories_to_remove,
-            **original_metadata,
-            **result.metadata
-        }
+        final_metadata = self._build_metadata(
+            area,
+            result.action.value,
+            original_metadata,
+            result.metadata,
+            {'replaced_memories': result.memories_to_remove},
+        )
 
         try:
             new_id = await db.insert_text(result.new_memory_content, final_metadata)
@@ -543,14 +551,13 @@ class MemoryConsolidator:
             new_content = update_info.get('new_content', '')
 
             if memory_id and new_content:
-                updated_metadata = {
-                    'area': area,
-                    'timestamp': self._get_timestamp(),
-                    'consolidation_action': result.action.value,
-                    'updated_from': memory_id,
-                    **original_metadata,
-                    **update_info.get('metadata', {})
-                }
+                updated_metadata = self._build_metadata(
+                    area,
+                    result.action.value,
+                    original_metadata,
+                    update_info.get('metadata', {}),
+                    {'updated_from': memory_id},
+                )
 
                 try:
                     new_id = await db.insert_text(new_content, updated_metadata)
@@ -570,18 +577,36 @@ class MemoryConsolidator:
 
         new_memory_id = None
         if result.new_memory_content:
-            final_metadata = {
-                'area': area,
-                'timestamp': self._get_timestamp(),
-                'consolidation_action': result.action.value,
-                **original_metadata,
-                **result.metadata
-            }
+            final_metadata = self._build_metadata(
+                area,
+                result.action.value,
+                original_metadata,
+                result.metadata,
+            )
 
             new_memory_id = await db.insert_text(result.new_memory_content, final_metadata)
             updated_ids.append(new_memory_id)
 
         return updated_ids
+
+    def _build_metadata(
+        self,
+        area: str,
+        action: str,
+        original_metadata: Dict[str, Any],
+        result_metadata: Dict[str, Any],
+        extra: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        metadata = {
+            'timestamp': self._get_timestamp(),
+            'consolidation_action': action,
+        }
+        if extra:
+            metadata.update(extra)
+        metadata.update(_without_reserved_metadata(original_metadata))
+        metadata.update(_without_reserved_metadata(result_metadata))
+        metadata['area'] = area
+        return metadata
 
     def _get_timestamp(self) -> str:
         """Get current timestamp in standard format."""

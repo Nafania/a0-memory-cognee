@@ -80,9 +80,11 @@ class FakeDB:
     def __init__(self, *, fail_insert: bool = False):
         self.fail_insert = fail_insert
         self.calls: list[tuple[str, object]] = []
+        self.insert_metadata: list[dict] = []
 
     async def insert_text(self, text, metadata):
         self.calls.append(("insert", text))
+        self.insert_metadata.append(dict(metadata))
         if self.fail_insert:
             raise RuntimeError("insert failed")
         return "new-id"
@@ -202,6 +204,40 @@ class MemoryConsolidationUpdateTest(unittest.TestCase):
 
         self.assertEqual(ids, [])
         self.assertEqual(db.calls, [("insert", "replacement memory")])
+
+    def test_result_metadata_cannot_override_reserved_memory_fields(self):
+        module = _load_consolidation_module()
+        consolidator = module.MemoryConsolidator(agent=object())
+        db = FakeDB()
+        result = module.ConsolidationResult(
+            action=module.ConsolidationAction.KEEP_SEPARATE,
+            new_memory_content="stored memory",
+            metadata={
+                "area": "solutions",
+                "id": "attacker-id",
+                "node_set": ["solutions"],
+                "node_name": "solutions",
+                "safe": "kept",
+            },
+        )
+
+        ids = asyncio.run(
+            consolidator._handle_keep_separate(
+                db,
+                result,
+                "fragments",
+                {"area": "main", "source": "original"},
+                None,
+            )
+        )
+
+        self.assertEqual(ids, ["new-id"])
+        self.assertEqual(db.insert_metadata[0]["area"], "fragments")
+        self.assertNotIn("id", db.insert_metadata[0])
+        self.assertNotIn("node_set", db.insert_metadata[0])
+        self.assertNotIn("node_name", db.insert_metadata[0])
+        self.assertEqual(db.insert_metadata[0]["safe"], "kept")
+        self.assertEqual(db.insert_metadata[0]["source"], "original")
 
 
 if __name__ == "__main__":
