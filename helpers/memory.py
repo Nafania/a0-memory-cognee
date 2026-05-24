@@ -296,7 +296,16 @@ class Memory:
                 "empty search result",
             )
 
-        return _results_to_documents(results or [], limit)
+        docs = _results_to_documents(results or [], limit)
+        for doc in docs:
+            dataset = str(doc.metadata.get("dataset") or self.dataset_name)
+            doc.metadata = hydrate_metadata(
+                self.memory_subdir,
+                dataset,
+                doc.page_content,
+                doc.metadata,
+            )
+        return docs
 
     async def delete_documents_by_query(
         self, query: str, threshold: float, filter: str = ""
@@ -394,6 +403,12 @@ class Memory:
                     node_set=[area],
                 )
                 content_id = content_hash_id(doc.page_content, self.dataset_name)
+                persist_metadata(
+                    self.memory_subdir,
+                    self.dataset_name,
+                    doc.page_content,
+                    doc.metadata,
+                )
                 ids.append(content_id)
                 CogneeBackgroundWorker.get_instance().mark_dirty(self.dataset_name)
             except Exception as e:
@@ -446,6 +461,74 @@ def _state_dir(memory_subdir: str) -> str:
         from helpers.projects import get_project_meta
         return files.get_abs_path(get_project_meta(memory_subdir[9:]), "cognee_state")
     return files.get_abs_path("usr/cognee_state", memory_subdir)
+
+
+def _metadata_index_path(memory_subdir: str) -> str:
+    return os.path.join(_state_dir(memory_subdir), "metadata.json")
+
+
+def _load_metadata_index(memory_subdir: str) -> dict[str, dict[str, Any]]:
+    path = _metadata_index_path(memory_subdir)
+    try:
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        PrintStyle.warning(f"Could not load Cognee metadata sidecar ({memory_subdir}): {e}")
+        return {}
+
+
+def _save_metadata_index(memory_subdir: str, index: dict[str, dict[str, Any]]) -> None:
+    path = _metadata_index_path(memory_subdir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(index, f, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def persist_metadata(
+    memory_subdir: str,
+    dataset_name: str,
+    content: str,
+    metadata: dict[str, Any],
+) -> None:
+    clean = {
+        key: value
+        for key, value in (metadata or {}).items()
+        if key != "id"
+    }
+    if not clean:
+        return
+    key = content_hash_id(content, dataset_name)
+    index = _load_metadata_index(memory_subdir)
+    index[key] = clean
+    _save_metadata_index(memory_subdir, index)
+
+
+def get_persisted_metadata(
+    memory_subdir: str,
+    dataset_name: str,
+    content: str,
+) -> dict[str, Any]:
+    key = content_hash_id(content, dataset_name)
+    return dict(_load_metadata_index(memory_subdir).get(key, {}))
+
+
+def hydrate_metadata(
+    memory_subdir: str,
+    dataset_name: str,
+    content: str,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    persisted = get_persisted_metadata(memory_subdir, dataset_name, content)
+    if not persisted:
+        return metadata
+    merged = dict(persisted)
+    merged.update(metadata or {})
+    return merged
 
 
 def _parse_filter_to_node_names(filter_str: str) -> list[str]:

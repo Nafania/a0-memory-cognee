@@ -46,12 +46,16 @@ def _load_dashboard_module(captured: dict, *, node_count: int = 2):
     memory = types.ModuleType("usr.plugins.memory_cognee.helpers.memory")
 
     class Memory:
-        def __init__(self, dataset_name):
+        def __init__(self, dataset_name, memory_subdir="default"):
             self.dataset_name = dataset_name
+            self.memory_subdir = memory_subdir
 
         @staticmethod
         async def get_by_subdir(memory_subdir, preload_knowledge=False):
-            return Memory(memory_subdir.replace("/", "_").replace(" ", "_").lower())
+            return Memory(
+                memory_subdir.replace("/", "_").replace(" ", "_").lower(),
+                memory_subdir,
+            )
 
         async def search_similarity_threshold(
             self,
@@ -89,6 +93,9 @@ def _load_dashboard_module(captured: dict, *, node_count: int = 2):
     memory.read_data_item_content_async = read_data_item_content_async
     memory.content_hash_id = lambda content, dataset_name="": f"hash-{dataset_name}"
     memory.parse_node_set_area = lambda raw: "main"
+    memory.hydrate_metadata = (
+        lambda memory_subdir, dataset_name, content, metadata: metadata
+    )
 
     graph_module = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_graph")
 

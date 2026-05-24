@@ -317,6 +317,44 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
                     )
                 )
 
+    def test_insert_documents_persists_non_cognee_metadata_by_content_hash(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+
+            class FakeCognee:
+                async def add(self, *args, **kwargs):
+                    return None
+
+            memory_module._get_cognee = lambda: (FakeCognee(), None)
+
+            memory = memory_module.Memory("default", "default")
+            asyncio.run(
+                memory.insert_documents(
+                    [
+                        memory_module.Document(
+                            page_content="stored memory",
+                            metadata={
+                                "area": "main",
+                                "tags": ["important"],
+                                "source_file": "notes.md",
+                                "id": "old-id",
+                            },
+                        )
+                    ]
+                )
+            )
+
+            metadata = memory_module.get_persisted_metadata(
+                "default",
+                "default",
+                "stored memory",
+            )
+
+            self.assertEqual(metadata["tags"], ["important"])
+            self.assertEqual(metadata["source_file"], "notes.md")
+            self.assertNotIn("id", metadata)
+
     def test_update_documents_inserts_replacement_before_deleting_old_memory(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker = FakeDirtyWorker()

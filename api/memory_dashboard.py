@@ -1,7 +1,7 @@
 import time as _time
 
 from helpers.api import ApiHandler, Request, Response
-from usr.plugins.memory_cognee.helpers.memory import Memory, get_existing_memory_subdirs, get_context_memory_subdir, read_data_item_content, read_data_item_content_async, parse_node_set_area
+from usr.plugins.memory_cognee.helpers.memory import Memory, get_existing_memory_subdirs, get_context_memory_subdir, read_data_item_content, read_data_item_content_async, parse_node_set_area, hydrate_metadata
 from helpers import files
 from helpers.print_style import PrintStyle
 from langchain_core.documents import Document
@@ -213,6 +213,7 @@ class MemoryDashboard(ApiHandler):
                         meta["area"] = parse_node_set_area(getattr(item, "node_set", None))
                         created = getattr(item, "created_at", None)
                         meta["timestamp"] = str(created) if created else ""
+                        meta = hydrate_metadata(memory.memory_subdir, ds.name, text, meta)
                         area_key = (meta.get("area") or "unknown").lower()
                         all_areas[area_key] = all_areas.get(area_key, 0) + 1
                         if area_filter and area_key != area_filter.lower():
