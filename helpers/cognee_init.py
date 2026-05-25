@@ -837,6 +837,101 @@ async def _detect_datasets_with_unready_graphs() -> set[str]:
 
     return unready_dataset_ids
 
+
+async def _log_startup_readiness(migration_completed: bool, worker_status: dict) -> None:
+    """Log a single operator-readable Cognee readiness summary."""
+    try:
+        import cognee
+
+        try:
+            from usr.plugins.memory_cognee.helpers.cognee_graph import read_dataset_graphs
+        except Exception:
+            from .cognee_graph import read_dataset_graphs
+
+        dataset_graphs = await read_dataset_graphs(
+            cognee,
+            skip_empty_data=True,
+            repair_unreadable=False,
+        )
+    except Exception as e:
+        PrintStyle.warning(
+            "Cognee startup readiness: UNKNOWN; could not read dataset graph "
+            f"status: {e}"
+        )
+        return
+
+    ready: list[str] = []
+    empty: list[str] = []
+    errors: list[str] = []
+    unknown: list[str] = []
+
+    for graph in dataset_graphs:
+        dataset_name = str(getattr(graph, "dataset_name", "") or "unknown")
+        graph_error = getattr(graph, "error", None)
+        graph_empty = getattr(graph, "graph_empty", None)
+
+        if graph_error:
+            errors.append(f"{dataset_name}: {graph_error}")
+        elif graph_empty is False:
+            ready.append(dataset_name)
+        elif graph_empty is True:
+            empty.append(dataset_name)
+        else:
+            unknown.append(dataset_name)
+
+    dirty = sorted(str(name) for name in (worker_status.get("dirty_datasets") or []))
+    readiness = worker_status.get("dataset_readiness") or {}
+    blocked_states = []
+    if isinstance(readiness, dict):
+        for dataset_name, state in readiness.items():
+            if not isinstance(state, dict):
+                continue
+            state_name = str(state.get("state") or "")
+            if state_name and state_name != "ready":
+                blocked_states.append(f"{dataset_name}:{state_name}")
+
+    running = bool(worker_status.get("running"))
+    graph_blocked = bool(empty or errors or unknown)
+    worker_blocked = bool(running or dirty or blocked_states)
+    graph_total = len(ready) + len(empty) + len(errors) + len(unknown)
+    migration_status = "complete" if migration_completed else "incomplete"
+
+    if graph_blocked or worker_blocked:
+        PrintStyle.warning(
+            "Cognee startup readiness: BLOCKED; recall may be unavailable. "
+            f"graphs_ready={len(ready)}/{graph_total}; "
+            f"migration={migration_status}; running={running}; "
+            f"dirty={dirty}; blocked_states={blocked_states}; "
+            f"empty_graphs={empty}; graph_errors={_short_list(errors)}; "
+            f"unknown_graphs={unknown}"
+        )
+    elif not migration_completed:
+        PrintStyle.warning(
+            "Cognee startup readiness: DEGRADED; Cognee recall is enabled for "
+            "existing graph datasets, but legacy FAISS migration is incomplete. "
+            f"graphs_ready={len(ready)}/{graph_total}; migration=incomplete"
+        )
+    else:
+        PrintStyle.standard(
+            "Cognee startup readiness: READY; recall enabled. "
+            f"graphs_ready={len(ready)}/{graph_total}; migration=complete"
+        )
+
+    PrintStyle.standard(
+        "Cognee dataset graph status: "
+        f"ready={_short_list(ready)}; "
+        f"empty={_short_list(empty)}; "
+        f"errors={_short_list(errors)}; "
+        f"unknown={_short_list(unknown)}"
+    )
+
+
+def _short_list(items: list[str], limit: int = 12) -> list[str]:
+    if len(items) <= limit:
+        return items
+    return [*items[:limit], f"... +{len(items) - limit} more"]
+
+
 async def _reset_cognify_status_for_datasets(
     dataset_ids: set[str],
     *,
@@ -1177,6 +1272,7 @@ def run_memory_cognee_init_a0_extension() -> None:
 
         worker = CogneeBackgroundWorker.get_instance()
         status = worker.get_status()
+        asyncio.run(_log_startup_readiness(migrated, status))
         dirty_datasets = list(status.get("dirty_datasets") or [])
         if dirty_datasets:
             PrintStyle.warning(

@@ -383,6 +383,80 @@ class CogneeBackgroundTest(unittest.TestCase):
         )
         self.assertEqual(scheduled_runs, [30.0])
 
+    def test_successful_rebuild_logs_ready_summary(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+
+        async def cognify(*, datasets, temporal_cognify):
+            return None
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        fake_cognee.datasets = FakeDatasets()
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        worker.mark_dirty("default")
+
+        asyncio.run(worker.run_pipeline())
+
+        messages = sys.modules["helpers.print_style"].PrintStyle.messages
+        self.assertTrue(
+            any(
+                level == "standard"
+                and "Cognee rebuild readiness: READY" in " ".join(str(arg) for arg in args)
+                for level, args in messages
+            )
+        )
+
+    def test_failed_rebuild_logs_blocked_summary(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+
+        async def cognify(*, datasets, temporal_cognify):
+            return None
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        fake_cognee.datasets = FakeDatasets()
+        _install_graph_engine_stub(is_empty=True)
+
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        worker._schedule_run_soon = lambda delay=None: None
+        worker.mark_dirty("default")
+
+        asyncio.run(worker.run_pipeline())
+
+        messages = sys.modules["helpers.print_style"].PrintStyle.messages
+        self.assertTrue(
+            any(
+                level == "warning"
+                and "Cognee rebuild readiness: BLOCKED" in " ".join(str(arg) for arg in args)
+                and "retry_scheduled=True" in " ".join(str(arg) for arg in args)
+                for level, args in messages
+            )
+        )
+
     def test_failed_rebuild_resets_pipeline_status_before_retry(self):
         class FakeDatasets:
             async def list_datasets(self):

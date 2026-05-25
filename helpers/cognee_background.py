@@ -451,6 +451,10 @@ class CogneeBackgroundWorker:
                     "Cognee pipeline did not complete readiness update",
                     f"dataset={dataset}",
                 )
+            self._log_rebuild_readiness(
+                retry_scheduled=should_reschedule,
+                retry_delay=reschedule_delay,
+            )
             if should_reschedule:
                 self._schedule_run_soon(reschedule_delay)
 
@@ -516,6 +520,44 @@ class CogneeBackgroundWorker:
         finally:
             with self._state_lock:
                 self._run_scheduled = False
+
+    def _log_rebuild_readiness(
+        self,
+        *,
+        retry_scheduled: bool,
+        retry_delay: float | None,
+    ) -> None:
+        with self._state_lock:
+            datasets = list(self._last_run_datasets)
+            dirty = sorted(self._dirty_datasets)
+            running = self._running
+            last_error = self._last_error
+            blocked_states = []
+            ready = []
+            for dataset_name, state in self._dataset_readiness.items():
+                state_name = str(state.get("state") or "")
+                if state_name == "ready":
+                    ready.append(dataset_name)
+                elif state_name:
+                    blocked_states.append(f"{dataset_name}:{state_name}")
+
+        if not datasets:
+            return
+
+        if running or dirty or blocked_states:
+            PrintStyle.warning(
+                "Cognee rebuild readiness: BLOCKED; recall may be unavailable. "
+                f"last_run_datasets={datasets}; ready={_short_list(sorted(ready))}; "
+                f"dirty={dirty}; blocked_states={_short_list(sorted(blocked_states))}; "
+                f"retry_scheduled={retry_scheduled}; retry_delay={retry_delay}; "
+                f"last_error={last_error}"
+            )
+            return
+
+        PrintStyle.standard(
+            "Cognee rebuild readiness: READY; recall enabled. "
+            f"last_run_datasets={datasets}; ready={_short_list(sorted(ready))}"
+        )
 
 
 def _is_empty_graph_improve_error(error: Exception) -> bool:
@@ -600,6 +642,12 @@ def _describe_graph_dataset_results(dataset_graphs: list) -> str:
         details.append(f"unverified dataset(s): {unknown_datasets}")
 
     return "; ".join(details)
+
+
+def _short_list(items: list[str], limit: int = 12) -> list[str]:
+    if len(items) <= limit:
+        return items
+    return [*items[:limit], f"... +{len(items) - limit} more"]
 
 
 async def _describe_non_empty_or_unverified_datasets(cognee, datasets: list[str]) -> str:

@@ -211,7 +211,13 @@ async def migrate_index(
         state["indices"][index_key] = index_state
         if not dry_run:
             save_state(base_dir, state)
-        return {"subdir": memory_subdir, "total": 0, "migrated": 0, "skipped": False}
+        return {
+            "subdir": memory_subdir,
+            "total": 0,
+            "migrated": 0,
+            "skipped": False,
+            "status": "error",
+        }
     if not all_docs:
         _log(f"  No documents found, marking complete")
         index_state["status"] = "complete"
@@ -246,6 +252,7 @@ async def migrate_index(
             "total": len(all_docs),
             "migrated": len(already_migrated),
             "skipped": False,
+            "status": index_state["status"],
         }
 
     migrated_this_run = 0
@@ -312,6 +319,7 @@ async def migrate_index(
         "total": len(all_docs),
         "migrated": len(already_migrated),
         "skipped": False,
+        "status": index_state["status"],
     }
 
 
@@ -497,7 +505,7 @@ async def run_migration(dry_run: bool = False, verify: bool = False, force: bool
     total_all = sum(r["total"] for r in results)
     migrated_all = sum(r["migrated"] for r in results)
     for r in results:
-        status = "SKIP" if r.get("skipped") else "OK"
+        status = "SKIP" if r.get("skipped") else str(r.get("status") or "ok").upper()
         _log(f"  [{status}] {r['subdir']}: {r['migrated']}/{r['total']} documents")
     _log(f"  TOTAL: {migrated_all}/{total_all} documents")
 

@@ -70,6 +70,26 @@ class FaissMigrationTest(unittest.TestCase):
             ):
                 sys.modules.pop(name, None)
 
+    def test_migrate_index_reports_error_status_when_faiss_load_fails(self):
+        module = _load_faiss_migration_module()
+        sys.modules["cognee"] = types.ModuleType("cognee")
+        state = {"version": 1, "indices": {}, "completed": False}
+        index = {
+            "type": "global",
+            "memory_subdir": "default",
+            "db_dir": "/tmp/usr/memory/default",
+            "index_path": "/tmp/usr/memory/default/index.faiss",
+        }
+        saved = []
+        module.load_faiss_db = lambda db_dir: None
+        module.save_state = lambda base_dir, new_state: saved.append(dict(new_state))
+
+        result = asyncio.run(module.migrate_index(index, state, "/tmp"))
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(state["indices"]["global:default"]["status"], "error")
+        self.assertTrue(saved)
+
     def test_completed_cleanup_reruns_migration_in_same_startup(self):
         module = _load_faiss_migration_module()
         state = {
