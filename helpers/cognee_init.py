@@ -79,16 +79,6 @@ _LEGACY_DEFAULT_EMBEDDING_CONFIG: dict[str, str] = {
     "api_base": "",
 }
 _embedding_rebuild_scheduled = False
-_WATCHDOG_EXCLUDE_DIRS: set[str] = set()
-_WATCHDOG_EXCLUDE_DIR_NAMES: set[str] = {
-    ".git",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".time_travel",
-    "__pycache__",
-    "node_modules",
-}
 
 
 def get_cognee_setting(name: str, default: T) -> T:
@@ -129,70 +119,6 @@ def _coerce_cognee_setting(value: Any, default: T) -> T:
         return default
     except (ValueError, TypeError):
         return default
-
-
-def _normalize_watchdog_exclude_path(path: os.PathLike[str] | str | bytes) -> str:
-    return os.path.abspath(os.path.normpath(os.fsdecode(path)))
-
-
-def _is_watchdog_excluded_path(path: os.PathLike[str] | str | bytes) -> bool:
-    normalized = _normalize_watchdog_exclude_path(path)
-    for excluded in _WATCHDOG_EXCLUDE_DIRS:
-        if normalized == excluded or normalized.startswith(excluded + os.sep):
-            return True
-    parts = normalized.split(os.sep)
-    if any(part in _WATCHDOG_EXCLUDE_DIR_NAMES for part in parts):
-        return True
-    for index, part in enumerate(parts[:-1]):
-        if part == ".a0proj" and parts[index + 1] == "memory":
-            return True
-    return False
-
-
-def _patch_watchdog_inotify_excludes(paths: list[str]) -> None:
-    """Keep Cognee database files out of Agent Zero's recursive file watcher."""
-    normalized_paths = {
-        _normalize_watchdog_exclude_path(path)
-        for path in paths
-        if path
-    }
-    if not normalized_paths:
-        return
-    _WATCHDOG_EXCLUDE_DIRS.update(normalized_paths)
-
-    try:
-        inotify_c = importlib.import_module("watchdog.observers.inotify_c")
-        inotify_cls = getattr(inotify_c, "Inotify", None)
-    except Exception:
-        return
-    if inotify_cls is None:
-        return
-    if getattr(inotify_cls, "_a0_memory_cognee_excludes_patch", False):
-        return
-
-    def _add_dir_watch(self, path, mask, *, recursive: bool) -> None:
-        if _is_watchdog_excluded_path(path):
-            return
-        if not os.path.isdir(path):
-            import errno
-
-            raise OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), path)
-        self._add_watch(path, mask)
-        if recursive:
-            for root, dirnames, _ in os.walk(path):
-                dirnames[:] = [
-                    dirname
-                    for dirname in dirnames
-                    if not _is_watchdog_excluded_path(os.path.join(root, dirname))
-                ]
-                for dirname in dirnames:
-                    full_path = os.path.join(root, dirname)
-                    if os.path.islink(full_path):
-                        continue
-                    self._add_watch(full_path, mask)
-
-    inotify_cls._add_dir_watch = _add_dir_watch
-    inotify_cls._a0_memory_cognee_excludes_patch = True
 
 
 def is_cognee_debug_enabled() -> bool:
@@ -503,17 +429,6 @@ def configure_cognee() -> None:
     # --- Storage directories (MUST be set BEFORE import cognee) ---
     data_dir = files.get_abs_path(get_cognee_setting("cognee_data_dir", "usr/cognee"))
     os.makedirs(data_dir, exist_ok=True)
-    _patch_watchdog_inotify_excludes(
-        [
-            data_dir,
-            files.get_abs_path("usr/cognee_state"),
-            files.get_abs_path("usr/memory"),
-            files.get_abs_path("usr/mcp"),
-            files.get_abs_path("usr/lib"),
-            files.get_abs_path("usr/npm-global"),
-            files.get_abs_path("usr/.npm"),
-        ]
-    )
 
     data_storage = os.path.join(data_dir, "data_storage")
     system_storage = os.path.join(data_dir, "cognee_system")

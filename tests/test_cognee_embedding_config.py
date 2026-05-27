@@ -57,6 +57,32 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
         )
         self.assertEqual(os.environ["EMBEDDING_DIMENSIONS"], "384")
 
+    def test_configure_cognee_does_not_patch_agent_zero_watchdog(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_inotify = types.ModuleType("watchdog.observers.inotify_c")
+
+            class Inotify:
+                def _add_dir_watch(self, path, mask, *, recursive: bool):
+                    return "original"
+
+            original_add_dir_watch = Inotify._add_dir_watch
+            fake_inotify.Inotify = Inotify
+            sys.modules.update(
+                {
+                    "watchdog": types.ModuleType("watchdog"),
+                    "watchdog.observers": types.ModuleType("watchdog.observers"),
+                    "watchdog.observers.inotify_c": fake_inotify,
+                }
+            )
+
+            module = self._load_module(tmp_dir)
+            module.configure_cognee()
+
+            self.assertIs(fake_inotify.Inotify._add_dir_watch, original_add_dir_watch)
+            self.assertFalse(
+                hasattr(fake_inotify.Inotify, "_a0_memory_cognee_excludes_patch")
+            )
+
     def test_first_seen_legacy_embedding_config_does_not_rebuild(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             module = self._load_module(tmp_dir)
@@ -204,84 +230,6 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
             module._save_pending_embedding_config_state(current)
 
             self.assertTrue(module._embedding_config_rebuild_needed(current))
-
-    def test_watchdog_patch_excludes_cognee_dirs_from_recursive_inotify(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            module = self._load_module(tmp_dir)
-            root = Path(tmp_dir) / "usr"
-            cognee_dir = root / "cognee"
-            cognee_nested = cognee_dir / "data_storage" / "table"
-            state_dir = root / "cognee_state"
-            legacy_memory_dir = root / "memory"
-            project_memory_dir = root / "projects" / "personal" / ".a0proj" / "memory"
-            git_dir = root / "plugins" / "memory_cognee" / ".git" / "objects"
-            node_modules_dir = root / "plugins" / "memory_cognee" / "node_modules" / "pkg"
-            mcp_dir = root / "mcp" / "fli-pkg" / "pkg"
-            lib_dir = root / "lib" / "python3.12" / "site-packages"
-            npm_dir = root / ".npm" / "_npx" / "pkg"
-            keep_dir = root / "projects"
-            project_keep_dir = root / "projects" / "personal" / "docs"
-            for path in (
-                cognee_nested,
-                state_dir,
-                legacy_memory_dir / "default",
-                project_memory_dir,
-                git_dir,
-                node_modules_dir,
-                mcp_dir,
-                lib_dir,
-                npm_dir,
-                project_keep_dir,
-            ):
-                path.mkdir(parents=True, exist_ok=True)
-            fake_inotify = types.ModuleType("watchdog.observers.inotify_c")
-
-            class Inotify:
-                def __init__(self):
-                    self.watched = []
-
-                def _add_watch(self, path, mask):
-                    self.watched.append(os.path.abspath(os.fsdecode(path)))
-
-            fake_inotify.Inotify = Inotify
-            sys.modules.update(
-                {
-                    "watchdog": types.ModuleType("watchdog"),
-                    "watchdog.observers": types.ModuleType("watchdog.observers"),
-                    "watchdog.observers.inotify_c": fake_inotify,
-                }
-            )
-
-            module._patch_watchdog_inotify_excludes(
-                [
-                    str(cognee_dir),
-                    str(state_dir),
-                    str(legacy_memory_dir),
-                    str(root / "mcp"),
-                    str(root / "lib"),
-                    str(root / ".npm"),
-                ]
-            )
-            watcher = fake_inotify.Inotify()
-            watcher._add_dir_watch(os.fsencode(root), 1, recursive=True)
-
-            self.assertIn(str(root), watcher.watched)
-            self.assertIn(str(keep_dir), watcher.watched)
-            self.assertIn(str(project_keep_dir), watcher.watched)
-            self.assertNotIn(str(cognee_dir), watcher.watched)
-            self.assertNotIn(str(cognee_nested), watcher.watched)
-            self.assertNotIn(str(state_dir), watcher.watched)
-            self.assertNotIn(str(legacy_memory_dir), watcher.watched)
-            self.assertNotIn(str(project_memory_dir), watcher.watched)
-            self.assertNotIn(str(git_dir), watcher.watched)
-            self.assertNotIn(str(node_modules_dir), watcher.watched)
-            self.assertNotIn(str(mcp_dir), watcher.watched)
-            self.assertNotIn(str(lib_dir), watcher.watched)
-            self.assertNotIn(str(npm_dir), watcher.watched)
-
-            direct = fake_inotify.Inotify()
-            direct._add_dir_watch(os.fsencode(cognee_dir), 1, recursive=True)
-            self.assertEqual(direct.watched, [])
 
     def _load_module(self, tmp_dir: str):
         helpers = types.ModuleType("helpers")
