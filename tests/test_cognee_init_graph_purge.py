@@ -359,10 +359,10 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         run_migrations_module = types.ModuleType("cognee.run_migrations")
 
-        async def run_startup_migrations():
+        async def run_migrations():
             raise SystemExit(1)
 
-        run_migrations_module.run_startup_migrations = run_startup_migrations
+        run_migrations_module.run_migrations = run_migrations
 
         relational_module = types.ModuleType("cognee.infrastructure.databases.relational")
 
@@ -395,10 +395,10 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         run_migrations_module = types.ModuleType("cognee.run_migrations")
 
-        async def run_startup_migrations():
+        async def run_migrations():
             return None
 
-        run_migrations_module.run_startup_migrations = run_startup_migrations
+        run_migrations_module.run_migrations = run_migrations
         old_run_migrations = sys.modules.get("cognee.run_migrations")
         sys.modules["cognee.run_migrations"] = run_migrations_module
 
@@ -411,13 +411,16 @@ class CogneeInitStartupTest(unittest.TestCase):
             reached_detection["value"] = True
             return set()
 
-        original_lancedb = cognee_init._patch_lancedb_migration_defaults
+        original_lancedb = cognee_init._run_lancedb_payload_schema_migrations
         original_sync = cognee_init._sync_missing_columns
         original_rewrite = cognee_init._rewrite_legacy_data_storage_locations
         original_quarantine = cognee_init._quarantine_missing_data_files
         original_optimize = cognee_init._optimize_fragmented_lancedb_tables
         original_detect = cognee_init._detect_datasets_with_unready_graphs
-        cognee_init._patch_lancedb_migration_defaults = lambda: None
+        async def no_lancedb_migration():
+            return []
+
+        cognee_init._run_lancedb_payload_schema_migrations = no_lancedb_migration
         cognee_init._sync_missing_columns = lambda: None
         cognee_init._rewrite_legacy_data_storage_locations = lambda: None
         cognee_init._quarantine_missing_data_files = lambda: None
@@ -426,7 +429,7 @@ class CogneeInitStartupTest(unittest.TestCase):
         try:
             asyncio.run(cognee_init._create_db_tables())
         finally:
-            cognee_init._patch_lancedb_migration_defaults = original_lancedb
+            cognee_init._run_lancedb_payload_schema_migrations = original_lancedb
             cognee_init._sync_missing_columns = original_sync
             cognee_init._rewrite_legacy_data_storage_locations = original_rewrite
             cognee_init._quarantine_missing_data_files = original_quarantine
@@ -448,23 +451,22 @@ class CogneeInitStartupTest(unittest.TestCase):
         async def run_migrations():
             calls.append("relational")
 
-        async def run_startup_migrations():
-            calls.append("startup")
-
         run_migrations_module.run_migrations = run_migrations
-        run_migrations_module.run_startup_migrations = run_startup_migrations
         old_run_migrations = sys.modules.get("cognee.run_migrations")
         sys.modules["cognee.run_migrations"] = run_migrations_module
 
         original_rebuild_needed = cognee_init._embedding_config_rebuild_needed
-        original_lancedb = cognee_init._patch_lancedb_migration_defaults
+        original_lancedb = cognee_init._run_lancedb_payload_schema_migrations
         original_sync = cognee_init._sync_missing_columns
         original_rewrite = cognee_init._rewrite_legacy_data_storage_locations
         original_quarantine = cognee_init._quarantine_missing_data_files
         original_optimize = cognee_init._optimize_fragmented_lancedb_tables
         original_detect = cognee_init._detect_datasets_with_unready_graphs
         cognee_init._embedding_config_rebuild_needed = lambda current=None: True
-        cognee_init._patch_lancedb_migration_defaults = lambda: None
+        async def no_lancedb_migration():
+            calls.append("vector")
+
+        cognee_init._run_lancedb_payload_schema_migrations = no_lancedb_migration
         cognee_init._sync_missing_columns = lambda: None
         cognee_init._rewrite_legacy_data_storage_locations = lambda: None
         cognee_init._quarantine_missing_data_files = lambda: None
@@ -486,7 +488,7 @@ class CogneeInitStartupTest(unittest.TestCase):
             else:
                 sys.modules["cognee.run_migrations"] = old_run_migrations
             cognee_init._embedding_config_rebuild_needed = original_rebuild_needed
-            cognee_init._patch_lancedb_migration_defaults = original_lancedb
+            cognee_init._run_lancedb_payload_schema_migrations = original_lancedb
             cognee_init._sync_missing_columns = original_sync
             cognee_init._rewrite_legacy_data_storage_locations = original_rewrite
             cognee_init._quarantine_missing_data_files = original_quarantine
@@ -930,44 +932,28 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         self.assertEqual(deleted_ids, [affected_id])
 
-    def test_patches_lancedb_migration_defaults_for_source_fields(self):
+    def test_lancedb_payload_schema_migration_fails_explicitly(self):
         cognee_init = _load_cognee_init_module()
 
-        module_name = "cognee.infrastructure.databases.vector.lancedb.LanceDBAdapter"
-        fake_module = types.ModuleType(module_name)
+        run_migrations_module = types.ModuleType("cognee.run_migrations")
 
-        class PayloadSchema:
-            model_fields = {
-                "id": object(),
-                "source_pipeline": object(),
-                "source_task": object(),
-                "source_node_set": object(),
-                "source_user": object(),
-                "source_content_hash": object(),
-                "metadata": object(),
-                "text": object(),
-            }
+        async def run_vector_migrations():
+            return [{"dataset_id": "default", "provider": "lancedb", "result": "failed"}]
 
-        class LanceDBAdapter:
-            def _get_payload_defaults(self, payload_schema):
-                return {"id": "", "text": ""}
-
-            def get_data_point_schema(self, payload_schema):
-                return PayloadSchema
-
-        fake_module.LanceDBAdapter = LanceDBAdapter
-        sys.modules[module_name] = fake_module
-
-        cognee_init._patch_lancedb_migration_defaults()
-
-        defaults = LanceDBAdapter()._get_payload_defaults(object())
-        self.assertEqual(defaults["source_pipeline"], None)
-        self.assertEqual(defaults["source_task"], None)
-        self.assertEqual(defaults["source_node_set"], None)
-        self.assertEqual(defaults["source_user"], None)
-        self.assertEqual(defaults["source_content_hash"], None)
-        self.assertEqual(defaults["metadata"], {})
-        self.assertEqual(defaults["text"], "")
+        run_migrations_module.run_vector_migrations = run_vector_migrations
+        old_run_migrations = sys.modules.get("cognee.run_migrations")
+        sys.modules["cognee.run_migrations"] = run_migrations_module
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Cognee LanceDB payload schema migration failed",
+            ):
+                asyncio.run(cognee_init._run_lancedb_payload_schema_migrations())
+        finally:
+            if old_run_migrations is None:
+                sys.modules.pop("cognee.run_migrations", None)
+            else:
+                sys.modules["cognee.run_migrations"] = old_run_migrations
 
     def test_patches_remote_lancedb_table_replay_step_to_avoid_self_cycle(self):
         cognee_init = _load_cognee_init_module()
@@ -1222,16 +1208,16 @@ class CogneeInitStartupTest(unittest.TestCase):
 
             run_migrations_module = types.ModuleType("cognee.run_migrations")
 
-            async def run_startup_migrations():
+            async def run_migrations():
                 return None
 
-            run_migrations_module.run_startup_migrations = run_startup_migrations
+            run_migrations_module.run_migrations = run_migrations
             old_run_migrations = sys.modules.get("cognee.run_migrations")
             sys.modules["cognee.run_migrations"] = run_migrations_module
 
             old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
             os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
-            original_lancedb = cognee_init._patch_lancedb_migration_defaults
+            original_lancedb = cognee_init._run_lancedb_payload_schema_migrations
             original_sync = cognee_init._sync_missing_columns
             original_rewrite = cognee_init._rewrite_legacy_data_storage_locations
             original_quarantine = cognee_init._quarantine_missing_data_files
@@ -1240,7 +1226,10 @@ class CogneeInitStartupTest(unittest.TestCase):
             async def no_datasets():
                 return set()
 
-            cognee_init._patch_lancedb_migration_defaults = lambda: None
+            async def no_lancedb_migration():
+                return []
+
+            cognee_init._run_lancedb_payload_schema_migrations = no_lancedb_migration
             cognee_init._sync_missing_columns = lambda: None
             cognee_init._rewrite_legacy_data_storage_locations = lambda: None
             cognee_init._quarantine_missing_data_files = lambda: None
@@ -1248,7 +1237,7 @@ class CogneeInitStartupTest(unittest.TestCase):
             try:
                 asyncio.run(cognee_init._create_db_tables())
             finally:
-                cognee_init._patch_lancedb_migration_defaults = original_lancedb
+                cognee_init._run_lancedb_payload_schema_migrations = original_lancedb
                 cognee_init._sync_missing_columns = original_sync
                 cognee_init._rewrite_legacy_data_storage_locations = original_rewrite
                 cognee_init._quarantine_missing_data_files = original_quarantine

@@ -665,19 +665,6 @@ def _cleanup_cognee_child_processes(
     gc.collect()
 
 
-def _stop_multiprocessing_resource_tracker() -> None:
-    """Stop Python's private resource_tracker in short-lived rebuild children."""
-    try:
-        from multiprocessing import resource_tracker
-
-        tracker = getattr(resource_tracker, "_resource_tracker", None)
-        stop = getattr(tracker, "_stop", None)
-        if callable(stop):
-            stop()
-    except Exception:
-        pass
-
-
 def _positive_int_or_none(value) -> int | None:
     if value in (None, ""):
         return None
@@ -950,8 +937,8 @@ async def _run_vector_rebuild_chunk_subprocess(
         args.append(seen_path)
     env = os.environ.copy()
     # The chunk process is already the lifecycle boundary. Running another
-    # LanceDB subprocess inside it leaves orphaned resource_tracker children
-    # under PID 1 after each chunk in Docker.
+    # LanceDB subprocess inside it leaves orphaned child processes under PID 1
+    # after each chunk in Docker.
     env["VECTOR_DB_SUBPROCESS_ENABLED"] = "false"
 
     try:
@@ -1193,7 +1180,10 @@ def _run_vector_rebuild_chunk_cli(argv: list[str]) -> int:
         result = {"error": f"{type(e).__name__}: {e}"}
         exit_code = 1
     finally:
-        _stop_multiprocessing_resource_tracker()
+        _cleanup_cognee_child_processes(
+            "vector-rebuild-chunk-cli",
+            baseline_pids=set(),
+        )
 
     with open(result_path, "w", encoding="utf-8") as result_file:
         json.dump(result, result_file, ensure_ascii=False)

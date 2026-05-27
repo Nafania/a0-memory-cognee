@@ -219,6 +219,24 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
                     )
                 )
 
+    def test_reload_uses_public_cognee_init_reset(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+            cognee_init = sys.modules["usr.plugins.memory_cognee.helpers.cognee_init"]
+            calls = []
+            cognee_init.reset_cognee_init_state = lambda: calls.append("reset")
+            cognee_init.configure_cognee = lambda: calls.append("configure")
+
+            memory_module.Memory._initialized_subdirs.add("default")
+            memory_module.Memory._datasets_cache["default"] = ["default"]
+
+            memory_module.reload()
+
+            self.assertEqual(calls, ["reset", "configure"])
+            self.assertEqual(memory_module.Memory._initialized_subdirs, set())
+            self.assertEqual(memory_module.Memory._datasets_cache, {})
+
     def test_similarity_search_keeps_verbose_result_shape_for_metadata(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker = FakeDirtyWorker()

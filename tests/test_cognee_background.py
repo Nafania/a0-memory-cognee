@@ -1184,6 +1184,45 @@ class CogneeBackgroundTest(unittest.TestCase):
             except FileNotFoundError:
                 pass
 
+    def test_vector_rebuild_chunk_cli_uses_public_child_cleanup(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        cognee_init = sys.modules["usr.plugins.memory_cognee.helpers.cognee_init"]
+        cognee_init.configure_cognee = lambda: None
+        cleanup_calls = []
+
+        async def rebuild_chunk(dataset, **kwargs):
+            return {"rows": 1, "nodes": 1, "skipped_nodes": 0, "edge_types": 0}
+
+        def cleanup(label, *, baseline_pids=None):
+            cleanup_calls.append((label, baseline_pids))
+
+        background._rebuild_embedding_vectors_chunk_in_current_process = rebuild_chunk
+        background._cleanup_cognee_child_processes = cleanup
+
+        fd, result_path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            code = background._run_vector_rebuild_chunk_cli(
+                [
+                    "cognee_background.py",
+                    "vector-rebuild-chunk",
+                    "default",
+                    "0",
+                    "10",
+                    "10",
+                    "0",
+                    result_path,
+                ]
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(cleanup_calls, [("vector-rebuild-chunk-cli", set())])
+        finally:
+            try:
+                os.remove(result_path)
+            except FileNotFoundError:
+                pass
+
     def test_lancedb_vector_rebuild_uses_delete_add_upsert_without_merge_insert(self):
         from pydantic import BaseModel, Field, create_model
 

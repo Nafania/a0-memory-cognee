@@ -81,6 +81,15 @@ _LEGACY_DEFAULT_EMBEDDING_CONFIG: dict[str, str] = {
 _embedding_rebuild_scheduled = False
 
 
+def reset_cognee_init_state() -> None:
+    """Reset cached Cognee module state before reconfiguring the plugin."""
+    global _configured, _cognee_module, _search_type_class
+
+    _configured = False
+    _cognee_module = None
+    _search_type_class = None
+
+
 def get_cognee_setting(name: str, default: T) -> T:
     target_default = _COGNEE_DEFAULTS.get(name, default)
     env_key = f"A0_SET_{name}"
@@ -550,25 +559,15 @@ def configure_cognee() -> None:
 
 
 async def _create_db_tables():
-    _patch_lancedb_migration_defaults()
     embedding_rebuild_needed = _embedding_config_rebuild_needed()
     try:
-        if embedding_rebuild_needed:
-            from cognee.run_migrations import run_migrations
+        from cognee.run_migrations import run_migrations
 
-            await run_migrations()
-            PrintStyle.warning(
-                "Skipping Cognee startup vector migrations because embedding "
-                "rebuild is pending; the background rebuild will recreate vectors."
-            )
-        else:
-            from cognee.run_migrations import run_startup_migrations
-
-            await run_startup_migrations()
+        await run_migrations()
     except BaseException as mig_err:
         # Must catch BaseException: Cognee's run_migrations() calls sys.exit(1)
         # on alembic failure, raising SystemExit which is BaseException, not Exception.
-        PrintStyle.error(f"Cognee run_startup_migrations failed ({type(mig_err).__name__}), trying create_db_and_tables: {mig_err}")
+        PrintStyle.error(f"Cognee relational migrations failed ({type(mig_err).__name__}), trying create_db_and_tables: {mig_err}")
         try:
             from cognee.infrastructure.databases.relational import create_db_and_tables
 
@@ -576,6 +575,14 @@ async def _create_db_tables():
         except Exception as e:
             PrintStyle.error(f"Cognee DB table creation failed: {e}")
             raise RuntimeError(f"Cognee DB table creation failed: {e}") from e
+
+    if embedding_rebuild_needed:
+        PrintStyle.warning(
+            "Skipping Cognee startup vector migrations because embedding "
+            "rebuild is pending; the background rebuild will recreate vectors."
+        )
+    else:
+        await _run_lancedb_payload_schema_migrations()
 
     _sync_missing_columns()
     _rewrite_legacy_data_storage_locations()
@@ -606,52 +613,39 @@ async def _create_db_tables():
     PrintStyle.standard("Cognee DB tables initialized")
 
 
-def _patch_lancedb_migration_defaults() -> None:
-    """Patch Cognee LanceDB migration defaults for old vector rows.
-
-    Cognee's generated LanceDB payload schema makes source_* fields required
-    even though the original Pydantic model defaults them to None. Existing
-    1.0.1-era rows do not contain those fields, so startup migration aborts
-    before rebuilding the table. Adding explicit None defaults lets Cognee's own
-    migration preserve rows instead of skipping them.
-    """
+async def _run_lancedb_payload_schema_migrations() -> list[dict[str, Any]]:
+    """Run Cognee's vector payload data migration as an explicit startup step."""
     try:
-        from cognee.infrastructure.databases.vector.lancedb.LanceDBAdapter import (
-            LanceDBAdapter,
-        )
+        from cognee.run_migrations import run_vector_migrations
 
-        if getattr(LanceDBAdapter, "_a0_memory_cognee_defaults_patch", False):
-            return
-
-        original = LanceDBAdapter._get_payload_defaults
-
-        def _patched_get_payload_defaults(self, payload_schema):
-            defaults = dict(original(self, payload_schema) or {})
-            try:
-                schema_model = self.get_data_point_schema(payload_schema)
-                fields = getattr(schema_model, "model_fields", {})
-            except Exception:
-                fields = {}
-
-            for key in (
-                "source_pipeline",
-                "source_task",
-                "source_node_set",
-                "source_user",
-                "source_content_hash",
-            ):
-                if key in fields and key not in defaults:
-                    defaults[key] = None
-
-            if "metadata" in fields and "metadata" not in defaults:
-                defaults["metadata"] = {}
-
-            return defaults
-
-        LanceDBAdapter._get_payload_defaults = _patched_get_payload_defaults
-        LanceDBAdapter._a0_memory_cognee_defaults_patch = True
+        summaries = await run_vector_migrations()
     except Exception as e:
-        PrintStyle.warning(f"Could not patch LanceDB migration defaults: {e}")
+        PrintStyle.error(f"Cognee LanceDB payload schema migration failed: {e}")
+        raise
+
+    summaries = list(summaries or [])
+    failed = []
+    checked_count = 0
+    migrated_count = 0
+    for summary in summaries:
+        result = summary.get("result") if isinstance(summary, dict) else None
+        if result == "failed":
+            failed.append(summary)
+            continue
+        if isinstance(result, dict):
+            checked_count += len(result.get("checked_collections") or [])
+            migrated_count += len(result.get("migrated_collections") or [])
+
+    if failed:
+        details = json.dumps(failed, ensure_ascii=False, default=str)
+        raise RuntimeError(f"Cognee LanceDB payload schema migration failed: {details}")
+
+    if summaries:
+        PrintStyle.standard(
+            "Cognee LanceDB payload schema migration completed "
+            f"(summaries={len(summaries)}, checked={checked_count}, migrated={migrated_count})"
+        )
+    return summaries
 
 
 def _patch_lancedb_remote_table_replay_refs() -> None:

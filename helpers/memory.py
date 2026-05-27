@@ -1085,9 +1085,7 @@ def get_custom_knowledge_subdir_abs(agent: Agent) -> str:
 
 def reload():
     from . import cognee_init as ci
-    ci._configured = False
-    ci._cognee_module = None
-    ci._search_type_class = None
+    ci.reset_cognee_init_state()
     Memory._initialized_subdirs.clear()
     Memory._datasets_cache.clear()
     Memory._invalidate_datasets_cache()
