@@ -13,6 +13,16 @@ from usr.plugins.memory_cognee.helpers.cognee_ops import run_cognee_operation
 DATA_NAME_TASK = "_recall_memories_task"
 DATA_NAME_ITER = "_recall_memories_iter"
 SEARCH_TIMEOUT = 30
+QUERY_METADATA_KEYS = {
+    "attachments",
+    "files",
+    "images",
+    "metadata",
+    "meta",
+    "system_message",
+    "tool_calls",
+    "tools",
+}
 
 
 class RecallMemories(Extension):
@@ -60,11 +70,11 @@ class RecallMemories(Extension):
         if not cfg:
             return
 
-        user_instruction = _message_query_text(loop_data.user_message)
-        if user_instruction:
-            query = user_instruction
-        else:
-            query = _history_query_text(self.agent.history)[-cfg["memory_recall_history_len"]:]
+        query = _recall_query_text(
+            self.agent.history,
+            loop_data.user_message,
+            cfg["memory_recall_history_len"],
+        )
 
         if not query or len(query) <= 3:
             log_item.update(
@@ -206,7 +216,7 @@ def _message_query_text(message) -> str:
 
     content = getattr(message, "content", None)
     text = _content_query_text(content)
-    if text:
+    if content is not None:
         return text
 
     try:
@@ -233,6 +243,23 @@ def _history_query_text(history) -> str:
     return "\n".join(parts).strip()
 
 
+def _recall_query_text(history, message, max_len: int) -> str:
+    parts: list[str] = []
+    history_text = _history_query_text(history)
+    message_text = _message_query_text(message)
+
+    if history_text:
+        parts.append(history_text)
+    if message_text and message_text not in parts:
+        parts.append(message_text)
+
+    query = "\n".join(parts).strip()
+    max_len = int(max_len or 0)
+    if max_len > 0 and len(query) > max_len:
+        return query[-max_len:]
+    return query
+
+
 def _content_query_text(content) -> str:
     if content is None:
         return ""
@@ -241,7 +268,8 @@ def _content_query_text(content) -> str:
         return content.strip()
 
     if isinstance(content, dict):
-        for key in ("user_message", "message", "text", "preview"):
+        preferred_keys = ("user_message", "message", "text", "preview")
+        for key in preferred_keys:
             if key in content:
                 text = _content_query_text(content.get(key))
                 if text:
@@ -252,7 +280,13 @@ def _content_query_text(content) -> str:
             if text:
                 return text
 
-        parts = [_content_query_text(value) for value in content.values()]
+        parts = [
+            _content_query_text(value)
+            for key, value in content.items()
+            if key not in preferred_keys
+            and key != "raw_content"
+            and key not in QUERY_METADATA_KEYS
+        ]
         return "\n".join(part for part in parts if part).strip()
 
     if isinstance(content, list):

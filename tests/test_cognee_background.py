@@ -263,7 +263,9 @@ class CogneeBackgroundTest(unittest.TestCase):
 
         background = _load_background_module(fake_cognee)
         cleanup_labels = []
-        background._cleanup_cognee_child_processes = cleanup_labels.append
+        background._cleanup_cognee_child_processes = (
+            lambda label, **kwargs: cleanup_labels.append(label)
+        )
         worker = background.CogneeBackgroundWorker()
         worker.mark_dirty("default")
         worker.mark_dirty("projects_alpha")
@@ -744,7 +746,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         background = _load_background_module(fake_cognee)
         background.read_dataset_graphs = read_graphs
         background._cleanup_cognee_child_processes = (
-            lambda label: calls.append(f"cleanup:{label}")
+            lambda label, **kwargs: calls.append(f"cleanup:{label}")
         )
         worker = background.CogneeBackgroundWorker()
         worker.mark_dirty("default")
@@ -810,6 +812,184 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertNotIn(("reset", "default"), calls)
         self.assertFalse(any(call[0] == "cognify" for call in calls))
         self.assertFalse(any(call[0] == "improve" for call in calls))
+
+    def test_embedding_vector_rebuild_with_no_vectors_fails_readiness(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = FakeDatasets()
+
+        async def cognify(**kwargs):
+            raise AssertionError("vector-only rebuild should not run cognify")
+
+        async def improve(*, dataset):
+            raise AssertionError("vector-only rebuild should not run improve")
+
+        async def vector_rebuild(dataset, **kwargs):
+            return {"nodes": 0, "skipped_nodes": 2, "edge_types": 1}
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        background._embedding_config_rebuild_needed = lambda: True
+        background._dataset_has_existing_graph = lambda dataset: _async_value(True)
+        background._purge_vector_store_for_rebuild = lambda dataset: _async_value(None)
+        background._rebuild_embedding_vectors_from_existing_graph = vector_rebuild
+
+        worker = background.CogneeBackgroundWorker()
+        worker._schedule_run_soon = lambda delay=None, **kwargs: None
+        worker.mark_dirty("default")
+
+        asyncio.run(worker.run_pipeline())
+
+        status = worker.get_status()
+        self.assertFalse(status["last_run_success"])
+        self.assertEqual(status["dirty_datasets"], ["default"])
+        self.assertEqual(status["dataset_readiness"]["default"]["state"], "failed")
+        self.assertIn("no searchable node vectors", status["last_error"])
+
+    def test_failed_vector_only_rebuild_retries_with_full_cognify(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = FakeDatasets()
+        calls = []
+
+        async def cognify(**kwargs):
+            calls.append(("cognify", kwargs["datasets"]))
+
+        async def improve(*, dataset):
+            calls.append(("improve", dataset))
+
+        async def purge(dataset):
+            calls.append(("purge", dataset))
+
+        async def vector_rebuild(dataset, **kwargs):
+            calls.append(("vector_rebuild", dataset))
+            return {"nodes": 0, "skipped_nodes": 2, "edge_types": 1}
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        background._embedding_config_rebuild_needed = lambda: True
+        background._dataset_has_existing_graph = lambda dataset: _async_value(True)
+        background._purge_vector_store_for_rebuild = purge
+        background._rebuild_embedding_vectors_from_existing_graph = vector_rebuild
+        async def reset(dataset):
+            calls.append(("reset", dataset))
+
+        background._reset_pipeline_status_for_rebuild = reset
+
+        worker = background.CogneeBackgroundWorker()
+        worker._schedule_run_soon = lambda delay=None, **kwargs: None
+        worker.mark_dirty("default")
+
+        asyncio.run(worker.run_pipeline())
+        asyncio.run(worker.run_pipeline())
+
+        self.assertEqual(
+            calls,
+            [
+                ("purge", "default"),
+                ("vector_rebuild", "default"),
+                ("reset", "default"),
+                ("purge", "default"),
+                ("cognify", ["default"]),
+                ("improve", "default"),
+            ],
+        )
+        self.assertTrue(worker.get_status()["last_run_success"])
+
+    def test_vector_purge_failure_is_fatal(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        cognee_init = sys.modules["usr.plugins.memory_cognee.helpers.cognee_init"]
+
+        async def purge(dataset_names):
+            raise RuntimeError(f"purge broken for {dataset_names}")
+
+        cognee_init.purge_lancedb_vector_tables_for_dataset_names = purge
+
+        with self.assertRaisesRegex(RuntimeError, "purge broken"):
+            asyncio.run(background._purge_vector_store_for_rebuild("default"))
+
+    def test_cleanup_only_terminates_children_created_after_baseline(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+
+        class FakeChild:
+            def __init__(self, pid):
+                self.pid = pid
+                self.name = f"child-{pid}"
+                self.terminated = False
+                self.killed = False
+
+            def is_alive(self):
+                return not self.terminated and not self.killed
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+            def join(self, timeout=None):
+                return None
+
+        existing_child = FakeChild(101)
+        rebuild_child = FakeChild(202)
+        background.multiprocessing.active_children = lambda: [existing_child, rebuild_child]
+
+        background._cleanup_cognee_child_processes("default", baseline_pids={101})
+
+        self.assertFalse(existing_child.terminated)
+        self.assertFalse(existing_child.killed)
+        self.assertTrue(rebuild_child.terminated)
+
+    def test_cleanup_terminates_known_stale_children_even_if_in_baseline(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+
+        class FakeChild:
+            pid = 303
+            name = "stale-cognee-child"
+
+            def __init__(self):
+                self.terminated = False
+
+            def is_alive(self):
+                return not self.terminated
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.terminated = True
+
+            def join(self, timeout=None):
+                return None
+
+        child = FakeChild()
+        background._COGNEE_CHILD_PROCESS_PIDS.add(child.pid)
+        background.multiprocessing.active_children = lambda: [child]
+
+        background._cleanup_cognee_child_processes("retry", baseline_pids={child.pid})
+
+        self.assertTrue(child.terminated)
 
     def test_vector_rebuild_orchestrates_isolated_process_chunks(self):
         fake_cognee = types.ModuleType("cognee")

@@ -909,23 +909,25 @@ async def purge_lancedb_vector_tables_for_dataset_names(
 
     system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
     if not system_root:
-        return []
+        raise RuntimeError("SYSTEM_ROOT_DIRECTORY is not configured")
 
     databases_root = Path(system_root) / "databases"
     if not databases_root.exists():
-        return []
+        raise RuntimeError(f"Cognee databases directory does not exist: {databases_root}")
 
     try:
         import cognee
     except Exception as e:
         PrintStyle.warning(f"Cannot import cognee to purge LanceDB vectors: {e}")
-        return []
+        raise RuntimeError(f"Cannot import cognee to purge LanceDB vectors: {e}") from e
 
     try:
         all_datasets = await cognee.datasets.list_datasets()
     except Exception as e:
         PrintStyle.warning(f"Could not list Cognee datasets to purge LanceDB vectors: {e}")
-        return []
+        raise RuntimeError(
+            f"Could not list Cognee datasets to purge LanceDB vectors: {e}"
+        ) from e
 
     target_dirs: dict[str, str] = {}
     for ds in all_datasets:
@@ -935,6 +937,13 @@ async def purge_lancedb_vector_tables_for_dataset_names(
         dir_name = _lancedb_dataset_dir_name(getattr(ds, "id", None))
         if dir_name:
             target_dirs[str(name)] = dir_name
+
+    missing_names = clean_names.difference(target_dirs)
+    if missing_names:
+        raise RuntimeError(
+            "Could not resolve Cognee dataset id(s) to purge LanceDB vectors: "
+            f"{sorted(missing_names)}"
+        )
 
     purged: list[str] = []
     for dataset_name, dir_name in target_dirs.items():
@@ -1207,9 +1216,11 @@ async def _detect_datasets_with_unready_graphs() -> set[str]:
             graph_error = getattr(graph, "error", None)
             graph_empty = getattr(graph, "graph_empty", None)
             if graph_error:
+                if dataset_id:
+                    unready_dataset_ids.add(dataset_id)
                 PrintStyle.warning(
                     f"Could not verify Cognee dataset '{dataset_name}' graph during "
-                    f"startup; leaving pipeline status unchanged: {graph_error}"
+                    f"startup; will reset cognify_pipeline: {graph_error}"
                 )
                 continue
             if graph_empty is False and not graph_error:
@@ -1417,21 +1428,20 @@ async def _reset_cognify_status_for_datasets(
             f"Graph will rebuild on next cognify()."
         )
 
-    if reset_count or reset_all:
-        try:
-            from .cognee_background import CogneeBackgroundWorker
+    try:
+        from .cognee_background import CogneeBackgroundWorker
 
-            worker = CogneeBackgroundWorker.get_instance()
-            for name in dataset_names:
-                worker.mark_dirty(name, preserve_readable=False)
-            if dataset_names:
-                PrintStyle.standard(
-                    f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild: {dataset_names}"
-                )
-        except Exception as e:
-            PrintStyle.warning(
-                f"Could not mark datasets dirty (graph will rebuild on next insert instead): {e}"
+        worker = CogneeBackgroundWorker.get_instance()
+        for name in dataset_names:
+            worker.mark_dirty(name, preserve_readable=False)
+        if dataset_names:
+            PrintStyle.standard(
+                f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild: {dataset_names}"
             )
+    except Exception as e:
+        PrintStyle.warning(
+            f"Could not mark datasets dirty (graph will rebuild on next insert instead): {e}"
+        )
 
 
 async def reset_cognify_status_for_dataset_names(dataset_names: list[str]) -> list[str]:

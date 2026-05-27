@@ -69,7 +69,7 @@ def _load_cognee_init_module(
             return types.SimpleNamespace(
                 get_status=lambda: {"dirty_datasets": list(dirty_datasets)},
                 run_pipeline=run_pipeline,
-                mark_dirty=lambda dataset_name: order.append(f"dirty:{dataset_name}"),
+                mark_dirty=lambda dataset_name, **kwargs: order.append(f"dirty:{dataset_name}"),
                 start=lambda: order.append("start"),
             )
 
@@ -204,7 +204,7 @@ class StartupFaissMigrationTest(unittest.TestCase):
             (base / "run_ui" / "init_a0" / "end" / "_90_start_cognee_worker.py").exists()
         )
 
-    def test_reset_cognify_status_does_not_mark_dirty_without_reset(self):
+    def test_reset_cognify_status_marks_dirty_even_without_pipeline_rows(self):
         order: list[str] = []
         module = _load_cognee_init_module(order)
 
@@ -229,7 +229,7 @@ class StartupFaissMigrationTest(unittest.TestCase):
             else:
                 sys.modules["cognee"] = old_cognee
 
-        self.assertNotIn("dirty:default", order)
+        self.assertIn("dirty:default", order)
 
 
 if __name__ == "__main__":

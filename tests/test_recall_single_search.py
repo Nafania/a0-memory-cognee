@@ -54,6 +54,25 @@ class FakeMessage:
         )
 
 
+class EmptyHistory:
+    def output(self):
+        return []
+
+    def output_text(self):
+        return ""
+
+
+class MetadataOnlyMessage:
+    content = {
+        "system_message": ["do not leak system"],
+        "user_message": "",
+        "attachments": [{"name": "secret attachment"}],
+    }
+
+    def output_text(self):
+        return "human: metadata-only wrapper"
+
+
 class FakeAgent:
     def __init__(self):
         self.history = FakeHistory()
@@ -296,7 +315,8 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(call["only_context"], False)
         self.assertIs(call["verbose"], False)
         self.assertIn("debug memory search", call["query_text"])
-        self.assertNotIn("previous raw user message", call["query_text"])
+        self.assertIn("previous raw user message", call["query_text"])
+        self.assertIn("previous assistant response", call["query_text"])
         self.assertNotIn("system_message", call["query_text"])
         self.assertNotIn("attachments", call["query_text"])
         self.assertEqual(
@@ -319,8 +339,11 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
         await extension.search_memories(FakeLogItem(), FakeLoopData())
 
         query = fake_cognee.search_calls[0]["query_text"]
-        self.assertEqual(query, "debug memory search")
+        self.assertIn("debug memory search", query)
+        self.assertIn("previous raw user message", query)
         self.assertNotIn('"user_message"', query)
+        self.assertNotIn("system_message", query)
+        self.assertNotIn("attachments", query)
 
     async def test_recall_query_uses_history_only_when_current_message_missing(self):
         fake_cognee = FakeCognee()
@@ -334,6 +357,24 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
         query = fake_cognee.search_calls[0]["query_text"]
         self.assertIn("previous raw user message", query)
         self.assertIn("previous assistant response", query)
+
+    async def test_recall_query_ignores_metadata_only_wrappers(self):
+        fake_cognee = FakeCognee()
+        split_calls = []
+        module = _load_recall_module(fake_cognee, split_calls)
+
+        extension = module.RecallMemories()
+        extension.agent = FakeAgent()
+        extension.agent.history = EmptyHistory()
+        log_item = FakeLogItem()
+
+        await extension.search_memories(
+            log_item,
+            FakeLoopData(user_message=MetadataOnlyMessage()),
+        )
+
+        self.assertEqual(fake_cognee.search_calls, [])
+        self.assertIn("No relevant memory query generated", log_item.fields["query"])
 
     async def test_recall_skips_search_while_rebuild_not_ready(self):
         fake_cognee = FakeCognee()

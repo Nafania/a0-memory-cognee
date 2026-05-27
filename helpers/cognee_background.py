@@ -26,6 +26,9 @@ from .cognee_init import get_cognee_setting
 from .cognee_ops import run_cognee_operation
 
 
+_COGNEE_CHILD_PROCESS_PIDS: set[int] = set()
+
+
 def _clean_vector_text(value: Any) -> str:
     if value is None:
         return ""
@@ -581,9 +584,39 @@ async def _lancedb_delete_add_upsert_index_data_points(
             seen_conn.close()
 
 
-def _cleanup_cognee_child_processes(label: str) -> None:
+def _child_pid(child: Any) -> int | None:
+    pid = getattr(child, "pid", None)
+    if pid is None:
+        return None
+    try:
+        return int(pid)
+    except (TypeError, ValueError):
+        return None
+
+
+def _active_child_pids() -> set[int]:
+    return {
+        pid
+        for child in multiprocessing.active_children()
+        if (pid := _child_pid(child)) is not None
+    }
+
+
+def _cleanup_cognee_child_processes(
+    label: str,
+    *,
+    baseline_pids: set[int] | None = None,
+) -> None:
     """Release Cognee/FastEmbed multiprocessing children between dataset rebuilds."""
-    children = multiprocessing.active_children()
+    baseline = baseline_pids or set()
+    children = []
+    for child in multiprocessing.active_children():
+        pid = _child_pid(child)
+        if pid in baseline and pid not in _COGNEE_CHILD_PROCESS_PIDS:
+            continue
+        if pid is not None:
+            _COGNEE_CHILD_PROCESS_PIDS.add(pid)
+        children.append(child)
     if not children:
         gc.collect()
         return
@@ -612,6 +645,16 @@ def _cleanup_cognee_child_processes(label: str) -> None:
         try:
             child.kill()
             child.join(timeout=2)
+        except Exception:
+            pass
+
+    for child in children:
+        pid = _child_pid(child)
+        if pid is None:
+            continue
+        try:
+            if not child.is_alive():
+                _COGNEE_CHILD_PROCESS_PIDS.discard(pid)
         except Exception:
             pass
 
@@ -1191,9 +1234,13 @@ async def _purge_vector_store_for_rebuild(dataset: str) -> None:
 
         await purge_lancedb_vector_tables_for_dataset_names([dataset])
     except Exception as e:
-        PrintStyle.warning(
+        PrintStyle.error(
             f"Could not purge LanceDB vector store before rebuild for {dataset}: {e}"
         )
+        raise RuntimeError(
+            "Could not purge LanceDB vector store before rebuild "
+            f"for {dataset}: {e}"
+        ) from e
 
 
 async def _run_cognify_with_corrupt_wal_repair(
@@ -1230,6 +1277,7 @@ async def _run_cognify_with_corrupt_wal_repair(
 
 
 async def _preflight_graph_store_for_rebuild(cognee: Any, dataset: str) -> None:
+    child_baseline_pids = _active_child_pids()
     dataset_graphs = await run_cognee_operation(
         "cognee.graph rebuild preflight",
         read_dataset_graphs,
@@ -1241,7 +1289,10 @@ async def _preflight_graph_store_for_rebuild(cognee: Any, dataset: str) -> None:
     )
     errors = _graph_read_errors(dataset_graphs)
     if _contains_corrupt_wal_error(errors):
-        _cleanup_cognee_child_processes(f"{dataset}-graph-repair-preflight")
+        _cleanup_cognee_child_processes(
+            f"{dataset}-graph-repair-preflight",
+            baseline_pids=child_baseline_pids,
+        )
         dataset_graphs = await run_cognee_operation(
             "cognee.graph rebuild preflight retry",
             read_dataset_graphs,
@@ -1645,6 +1696,7 @@ class CogneeBackgroundWorker:
             retry_delays: list[float] = []
             for dataset in datasets:
                 dataset_started = False
+                child_baseline_pids = _active_child_pids()
                 try:
                     with self._state_lock:
                         self._set_dataset_state_locked(
@@ -1662,7 +1714,11 @@ class CogneeBackgroundWorker:
                         or dataset in pipeline_reset_datasets
                     )
                     rebuilt_vectors_only = False
-                    if embedding_rebuild_needed and await _dataset_has_existing_graph(dataset):
+                    if (
+                        embedding_rebuild_needed
+                        and not needs_pipeline_reset
+                        and await _dataset_has_existing_graph(dataset)
+                    ):
                         await _purge_vector_store_for_rebuild(dataset)
                         counts = await run_cognee_operation(
                             "cognee.vector rebuild from existing graph",
@@ -1685,6 +1741,11 @@ class CogneeBackgroundWorker:
                             f"skipped_nodes={counts.get('skipped_nodes', 0)}, "
                             f"edge_types={counts.get('edge_types', 0)}"
                         )
+                        if int(counts.get("nodes", 0) or 0) <= 0:
+                            raise RuntimeError(
+                                "Cognee vector rebuild produced no searchable node "
+                                f"vectors for dataset: {dataset}"
+                            )
                     else:
                         if needs_pipeline_reset or embedding_rebuild_needed:
                             await _reset_pipeline_status_for_rebuild(dataset)
@@ -1797,7 +1858,10 @@ class CogneeBackgroundWorker:
                 finally:
                     if dataset_started:
                         try:
-                            _cleanup_cognee_child_processes(dataset)
+                            _cleanup_cognee_child_processes(
+                                dataset,
+                                baseline_pids=child_baseline_pids,
+                            )
                         except Exception as cleanup_error:
                             PrintStyle.warning(
                                 "Cognee child process cleanup failed after "

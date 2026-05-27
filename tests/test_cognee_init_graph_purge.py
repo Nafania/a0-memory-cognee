@@ -591,7 +591,7 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         self.assertEqual(unready, set())
 
-    def test_unready_detection_ignores_graph_read_error(self):
+    def test_unready_detection_treats_graph_read_error_as_unready(self):
         cognee_init = _load_cognee_init_module()
 
         dataset_id = "00afc710-2c0c-5d61-957e-c452672842ae"
@@ -633,7 +633,7 @@ class CogneeInitStartupTest(unittest.TestCase):
                     "usr.plugins.memory_cognee.helpers.cognee_graph"
                 ] = old_graph
 
-        self.assertEqual(unready, set())
+        self.assertEqual(unready, {dataset_id})
 
     def test_startup_readiness_logs_degraded_when_faiss_pending(self):
         cognee_init = _load_cognee_init_module()
@@ -1175,6 +1175,42 @@ class CogneeInitStartupTest(unittest.TestCase):
         self.assertFalse(target_exists_after)
         self.assertTrue(other_exists_after)
         self.assertTrue(graph_exists_after)
+
+    def test_purge_lancedb_vector_store_raises_when_datasets_cannot_be_listed(self):
+        cognee_init = _load_cognee_init_module()
+
+        fake_cognee = types.ModuleType("cognee")
+
+        class FakeDatasets:
+            async def list_datasets(self):
+                raise RuntimeError("dataset registry down")
+
+        fake_cognee.datasets = FakeDatasets()
+        old_cognee = sys.modules.get("cognee")
+        sys.modules["cognee"] = fake_cognee
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_root = Path(tmp_dir) / "cognee_system"
+            (system_root / "databases").mkdir(parents=True)
+
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "dataset registry down"):
+                    asyncio.run(
+                        cognee_init.purge_lancedb_vector_tables_for_dataset_names(
+                            ["default"]
+                        )
+                    )
+            finally:
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+                if old_cognee is None:
+                    sys.modules.pop("cognee", None)
+                else:
+                    sys.modules["cognee"] = old_cognee
 
     def test_startup_does_not_purge_ladybug_graph_files(self):
         cognee_init = _load_cognee_init_module()

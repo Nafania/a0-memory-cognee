@@ -238,6 +238,27 @@ class RecallSplitTest(unittest.TestCase):
             "chunk text stored in solution area"
         ])
 
+    def test_split_uses_cognee_camel_case_chunk_area_metadata(self):
+        memory = _load_memory_module()
+
+        memories, solutions = memory.split_recall_answers_by_area(
+            [
+                {
+                    "text": "camel case chunk text stored in solution area",
+                    "belongsToSet": ["solutions"],
+                    "nodeName": "solutions",
+                    "id": "chunk-solution",
+                }
+            ],
+            memory_limit=5,
+            solution_limit=3,
+        )
+
+        self.assertEqual(memories, [])
+        self.assertEqual([doc.page_content for doc in solutions], [
+            "camel case chunk text stored in solution area"
+        ])
+
     def test_split_uses_normalized_chunk_raw_metadata(self):
         memory = _load_memory_module()
         result = types.SimpleNamespace(
@@ -256,6 +277,46 @@ class RecallSplitTest(unittest.TestCase):
         self.assertEqual(memories, [])
         self.assertEqual([doc.page_content for doc in solutions], [
             "normalized chunk text stored in solution area"
+        ])
+
+    def test_split_uses_normalized_chunk_payload_metadata(self):
+        memory = _load_memory_module()
+        result = types.SimpleNamespace(
+            text="payload chunk text stored in solution area",
+            metadata={},
+            payload={"belongsToSet": ["solutions"]},
+            dataset_name="default",
+        )
+
+        memories, solutions = memory.split_recall_answers_by_area(
+            [result],
+            memory_limit=5,
+            solution_limit=3,
+        )
+
+        self.assertEqual(memories, [])
+        self.assertEqual([doc.page_content for doc in solutions], [
+            "payload chunk text stored in solution area"
+        ])
+
+    def test_split_uses_direct_object_area_metadata(self):
+        memory = _load_memory_module()
+        result = types.SimpleNamespace(
+            text="direct chunk text stored in solution area",
+            metadata={},
+            nodeName="solutions",
+            dataset_name="default",
+        )
+
+        memories, solutions = memory.split_recall_answers_by_area(
+            [result],
+            memory_limit=5,
+            solution_limit=3,
+        )
+
+        self.assertEqual(memories, [])
+        self.assertEqual([doc.page_content for doc in solutions], [
+            "direct chunk text stored in solution area"
         ])
 
 

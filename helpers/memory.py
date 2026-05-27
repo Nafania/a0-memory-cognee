@@ -646,6 +646,8 @@ def _area_metadata_keys() -> tuple[str, ...]:
         "belongs_to_set",
         "source_node_set",
         "nodeSet",
+        "nodeName",
+        "belongsToSet",
         "sourceNodeSet",
     )
 
@@ -664,6 +666,24 @@ def _copy_recall_metadata(source: Any, metadata: dict[str, Any]) -> None:
 
     if source.get("id"):
         metadata["id"] = str(source["id"])
+
+
+def _copy_recall_object_metadata(source: Any, metadata: dict[str, Any]) -> None:
+    raw_metadata = getattr(source, "metadata", {})
+    if isinstance(raw_metadata, dict):
+        metadata.update(raw_metadata)
+
+    for nested_attr in ("payload", "raw"):
+        _copy_recall_metadata(getattr(source, nested_attr, None), metadata)
+
+    for key in _area_metadata_keys() + ("type", "score"):
+        if hasattr(source, key):
+            value = getattr(source, key)
+            if value is not None:
+                metadata[key] = value
+
+    if getattr(source, "id", None):
+        metadata["id"] = str(getattr(source, "id"))
 
 
 def _content_from_recall_dict(item: dict[str, Any]) -> str:
@@ -705,14 +725,7 @@ def _results_to_documents(results: Any, limit: int | None) -> list[Document]:
                 _copy_recall_metadata(item.get(nested_key), metadata)
         elif hasattr(item, "text"):
             content = str(item.text)
-            raw_metadata = getattr(item, "metadata", {})
-            if isinstance(raw_metadata, dict):
-                metadata.update(raw_metadata)
-            _copy_recall_metadata(getattr(item, "raw", None), metadata)
-            if getattr(item, "id", None):
-                metadata["id"] = str(getattr(item, "id"))
-            if getattr(item, "score", None) is not None:
-                metadata["score"] = getattr(item, "score")
+            _copy_recall_object_metadata(item, metadata)
         elif hasattr(item, "page_content"):
             content = item.page_content
             metadata = getattr(item, "metadata", {})
