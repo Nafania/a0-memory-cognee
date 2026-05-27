@@ -1342,7 +1342,7 @@ class CogneeBackgroundWorker:
         self._dirty_datasets: Set[str] = set()
         self._dirty_versions: dict[str, int] = {}
         self._insert_count: int = 0
-        self._last_cognify_time: float = 0
+        self._last_cognify_time: float = time.monotonic()
         self._running: bool = False
         self._run_scheduled: bool = False
         self._run_scheduled_force: bool = False

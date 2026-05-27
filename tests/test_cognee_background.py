@@ -458,6 +458,46 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertEqual(status["dataset_readiness"]["default"]["state"], "dirty")
         self.assertTrue(status["dataset_readiness"]["default"]["readable"])
 
+    def test_first_insert_after_startup_waits_for_cognify_threshold(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = FakeDatasets()
+        cognify_calls = []
+
+        async def cognify(*, datasets, temporal_cognify, **kwargs):
+            cognify_calls.append(list(datasets))
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        with worker._state_lock:
+            worker._set_dataset_state_locked(
+                "default",
+                "ready",
+                "Cognee memory graph rebuild completed",
+            )
+
+        worker.mark_dirty("default")
+        asyncio.run(worker._run_after_delay(0))
+
+        self.assertEqual(cognify_calls, [])
+        status = worker.get_status()
+        self.assertEqual(status["dirty_datasets"], ["default"])
+        self.assertEqual(status["insert_count"], 1)
+        self.assertTrue(status["dataset_readiness"]["default"]["readable"])
+
     def test_unreadable_dirty_dataset_runs_without_waiting_for_threshold(self):
         class FakeDatasets:
             async def list_datasets(self):
