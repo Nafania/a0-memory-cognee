@@ -751,7 +751,7 @@ class CogneeInitStartupTest(unittest.TestCase):
                     False,
                     {
                         "dirty_datasets": ["default"],
-                        "dataset_readiness": {"default": {"state": "dirty"}},
+                        "dataset_readiness": {"default": {"state": "dirty", "readable": False}},
                         "running": False,
                     },
                 )
@@ -824,7 +824,7 @@ class CogneeInitStartupTest(unittest.TestCase):
                     True,
                     {
                         "dirty_datasets": ["default"],
-                        "dataset_readiness": {"default": {"state": "dirty"}},
+                        "dataset_readiness": {"default": {"state": "dirty", "readable": False}},
                         "running": False,
                     },
                 )

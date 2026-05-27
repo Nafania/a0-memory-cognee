@@ -325,7 +325,7 @@ class CogneeBackgroundTest(unittest.TestCase):
             ],
         )
 
-    def test_running_rebuild_blocks_ready_dataset_search(self):
+    def test_running_rebuild_does_not_block_ready_dataset_search(self):
         fake_cognee = types.ModuleType("cognee")
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
@@ -342,10 +342,152 @@ class CogneeBackgroundTest(unittest.TestCase):
                 "Cognee memory graph rebuild running",
             )
 
+        self.assertIsNone(worker.get_search_block_reason(["default"]))
+
+    def test_dirty_ready_dataset_keeps_search_readable_while_reindexing(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        with worker._state_lock:
+            worker._set_dataset_state_locked(
+                "default",
+                "ready",
+                "Cognee memory graph rebuild completed",
+            )
+
+        worker.mark_dirty("default")
+
+        status = worker.get_status()
+        self.assertEqual(status["dataset_readiness"]["default"]["state"], "dirty")
+        self.assertTrue(status["dataset_readiness"]["default"]["readable"])
+        self.assertIsNone(worker.get_search_block_reason(["default"]))
+
+    def test_rebuilding_ready_dataset_keeps_search_readable(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        with worker._state_lock:
+            worker._set_dataset_state_locked(
+                "default",
+                "ready",
+                "Cognee memory graph rebuild completed",
+            )
+            worker._set_dataset_state_locked(
+                "default",
+                "rebuilding",
+                "Cognee memory graph rebuild running",
+            )
+
+        status = worker.get_status()
+        self.assertEqual(status["dataset_readiness"]["default"]["state"], "rebuilding")
+        self.assertTrue(status["dataset_readiness"]["default"]["readable"])
+        self.assertIsNone(worker.get_search_block_reason(["default"]))
+
+    def test_dirty_dataset_without_ready_snapshot_blocks_search(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+
+        worker.mark_dirty("default")
+
         self.assertEqual(
             worker.get_search_block_reason(["default"]),
-            "Cognee memory graph rebuild running for dataset(s): ['projects_alpha']",
+            "Cognee memory graph rebuild pending for dataset(s): ['default']",
         )
+
+    def test_dirty_can_invalidate_readable_snapshot_for_full_rebuilds(self):
+        fake_cognee = types.ModuleType("cognee")
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        with worker._state_lock:
+            worker._set_dataset_state_locked(
+                "default",
+                "ready",
+                "Cognee memory graph rebuild completed",
+            )
+
+        worker.mark_dirty("default", preserve_readable=False)
+
+        status = worker.get_status()
+        self.assertFalse(status["dataset_readiness"]["default"]["readable"])
+        self.assertEqual(
+            worker.get_search_block_reason(["default"]),
+            "Cognee memory graph rebuild pending for dataset(s): ['default']",
+        )
+
+    def test_single_insert_on_readable_dataset_waits_for_cognify_threshold(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = FakeDatasets()
+        cognify_calls = []
+
+        async def cognify(*, datasets, temporal_cognify, **kwargs):
+            cognify_calls.append(list(datasets))
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        with worker._state_lock:
+            worker._last_cognify_time = time.monotonic()
+            worker._set_dataset_state_locked(
+                "default",
+                "ready",
+                "Cognee memory graph rebuild completed",
+            )
+
+        worker.mark_dirty("default")
+        asyncio.run(worker._run_after_delay(0))
+
+        self.assertEqual(cognify_calls, [])
+        status = worker.get_status()
+        self.assertEqual(status["dirty_datasets"], ["default"])
+        self.assertEqual(status["dataset_readiness"]["default"]["state"], "dirty")
+        self.assertTrue(status["dataset_readiness"]["default"]["readable"])
+
+    def test_unreadable_dirty_dataset_runs_without_waiting_for_threshold(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = FakeDatasets()
+        cognify_calls = []
+
+        async def cognify(*, datasets, temporal_cognify, **kwargs):
+            cognify_calls.append(list(datasets))
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        worker = background.CogneeBackgroundWorker()
+        with worker._state_lock:
+            worker._last_cognify_time = time.monotonic()
+
+        worker.mark_dirty("default")
+        asyncio.run(worker._run_after_delay(0, force=True))
+
+        self.assertEqual(cognify_calls, [["default"]])
+        self.assertEqual(worker.get_status()["dirty_datasets"], [])
 
     def test_background_rebuild_passes_bounded_cognify_batches(self):
         class FakeDatasets:
@@ -543,7 +685,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         background = _load_background_module(fake_cognee)
         background.read_dataset_graphs = read_graphs
         worker = background.CogneeBackgroundWorker()
-        worker._schedule_run_soon = lambda delay=None: None
+        worker._schedule_run_soon = lambda delay=None, **kwargs: None
         worker.mark_dirty("default")
 
         asyncio.run(worker.run_pipeline())
@@ -1406,7 +1548,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
         scheduled_runs = []
-        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker._schedule_run_soon = lambda delay=None, **kwargs: scheduled_runs.append(delay)
         worker.mark_dirty("default")
         scheduled_runs.clear()
 
@@ -1479,7 +1621,7 @@ class CogneeBackgroundTest(unittest.TestCase):
 
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
-        worker._schedule_run_soon = lambda delay=None: None
+        worker._schedule_run_soon = lambda delay=None, **kwargs: None
         worker.mark_dirty("default")
 
         asyncio.run(worker.run_pipeline())
@@ -1517,7 +1659,7 @@ class CogneeBackgroundTest(unittest.TestCase):
 
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
-        worker._schedule_run_soon = lambda delay=None: None
+        worker._schedule_run_soon = lambda delay=None, **kwargs: None
         worker.mark_dirty("default")
         asyncio.run(worker.run_pipeline())
 
@@ -1554,7 +1696,7 @@ class CogneeBackgroundTest(unittest.TestCase):
 
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
-        worker._schedule_run_soon = lambda delay=None: None
+        worker._schedule_run_soon = lambda delay=None, **kwargs: None
         worker.mark_dirty("default")
         asyncio.run(worker.run_pipeline())
 
@@ -1578,7 +1720,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
         scheduled_runs = []
-        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker._schedule_run_soon = lambda delay=None, **kwargs: scheduled_runs.append(delay)
         worker.mark_dirty("default")
         scheduled_runs.clear()
         original_import = builtins.__import__
@@ -1631,7 +1773,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         )
         worker = background.CogneeBackgroundWorker()
         scheduled_runs = []
-        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker._schedule_run_soon = lambda delay=None, **kwargs: scheduled_runs.append(delay)
         worker.mark_dirty("default")
         scheduled_runs.clear()
 
@@ -1699,7 +1841,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
         scheduled_runs = []
-        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker._schedule_run_soon = lambda delay=None, **kwargs: scheduled_runs.append(delay)
         worker.mark_dirty("default")
         scheduled_runs.clear()
 
@@ -1727,7 +1869,7 @@ class CogneeBackgroundTest(unittest.TestCase):
 
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
-        worker._schedule_run_soon = lambda delay=None: None
+        worker._schedule_run_soon = lambda delay=None, **kwargs: None
         worker.mark_dirty("default")
         worker.mark_dirty("projects_alpha")
 
@@ -1751,7 +1893,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         )
         worker = background.CogneeBackgroundWorker()
         scheduled_runs = []
-        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker._schedule_run_soon = lambda delay=None, **kwargs: scheduled_runs.append(delay)
         worker.mark_dirty("default")
         scheduled_runs.clear()
         with worker._state_lock:
@@ -1785,7 +1927,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         )
         worker = background.CogneeBackgroundWorker()
         scheduled_runs = []
-        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker._schedule_run_soon = lambda delay=None, **kwargs: scheduled_runs.append(delay)
         worker.mark_dirty("default")
         scheduled_runs.clear()
         with worker._state_lock:
@@ -1897,7 +2039,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
         scheduled_runs = []
-        worker._schedule_run_soon = lambda delay=None: scheduled_runs.append(delay)
+        worker._schedule_run_soon = lambda delay=None, **kwargs: scheduled_runs.append(delay)
         worker.mark_dirty("default")
         scheduled_runs.clear()
 

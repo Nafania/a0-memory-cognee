@@ -1294,6 +1294,7 @@ class CogneeBackgroundWorker:
         self._last_cognify_time: float = 0
         self._running: bool = False
         self._run_scheduled: bool = False
+        self._run_scheduled_force: bool = False
         self._last_error: str | None = None
         self._last_run_datasets: list[str] = []
         self._last_run_success: bool = False
@@ -1310,7 +1311,13 @@ class CogneeBackgroundWorker:
                 cls._instance = cls()
         return cls._instance
 
-    def mark_dirty(self, dataset_name: str, *, reset_retry: bool = True) -> None:
+    def mark_dirty(
+        self,
+        dataset_name: str,
+        *,
+        reset_retry: bool = True,
+        preserve_readable: bool = True,
+    ) -> None:
         """Mark a dataset as having new data."""
         with self._state_lock:
             self._dirty_datasets.add(dataset_name)
@@ -1318,12 +1325,45 @@ class CogneeBackgroundWorker:
             if reset_retry:
                 self._retry_attempts.pop(dataset_name, None)
             self._insert_count += 1
+            readable = (
+                self._dataset_has_readable_snapshot_locked(dataset_name)
+                if preserve_readable
+                else False
+            )
             self._set_dataset_state_locked(
                 dataset_name,
                 "dirty",
                 "Cognee memory graph rebuild pending",
+                readable=readable,
             )
-        self._schedule_run_soon()
+        self._schedule_run_soon(force=not preserve_readable or not readable)
+
+    def mark_datasets_readable(
+        self,
+        dataset_names: list[str],
+        reason: str = "Cognee memory graph is readable",
+    ) -> None:
+        """Record that existing graph/vector data can serve search while rebuild catches up."""
+        now = time.monotonic()
+        with self._state_lock:
+            for dataset_name in dataset_names:
+                if not dataset_name:
+                    continue
+                readiness = dict(self._dataset_readiness.get(dataset_name, {}))
+                state = str(readiness.get("state") or "")
+                if not state:
+                    state = "ready"
+                readiness.update(
+                    {
+                        "state": state,
+                        "reason": readiness.get("reason") or reason,
+                        "readable": True,
+                        "last_ready_at": now,
+                        "last_ready_reason": reason,
+                        "updated_at": readiness.get("updated_at") or now,
+                    }
+                )
+                self._dataset_readiness[dataset_name] = readiness
 
     def get_status(self) -> dict:
         """Return current status for dashboard."""
@@ -1355,15 +1395,13 @@ class CogneeBackgroundWorker:
         pending: list[str] = []
         rebuilding: list[str] = []
         failed: list[str] = []
-        global_rebuilding: list[str] = []
-        global_pending: list[str] = []
-        running = False
         with self._state_lock:
             for dataset in clean_datasets:
-                state = str(
-                    self._dataset_readiness.get(dataset, {}).get("state") or ""
-                )
+                readiness = self._dataset_readiness.get(dataset, {})
+                state = str(readiness.get("state") or "")
                 if not state or state == "ready":
+                    continue
+                if self._dataset_has_readable_snapshot_locked(dataset):
                     continue
                 if state == "rebuilding":
                     rebuilding.append(dataset)
@@ -1371,14 +1409,6 @@ class CogneeBackgroundWorker:
                     failed.append(dataset)
                 else:
                     pending.append(dataset)
-
-            running = self._running
-            for dataset, readiness in self._dataset_readiness.items():
-                state = str(readiness.get("state") or "")
-                if state == "rebuilding":
-                    global_rebuilding.append(dataset)
-                elif state and state != "ready" and state != "failed":
-                    global_pending.append(dataset)
 
         if rebuilding:
             return f"Cognee memory graph rebuild running for dataset(s): {rebuilding}"
@@ -1393,16 +1423,6 @@ class CogneeBackgroundWorker:
                         failure_reasons.append(f"{dataset}: {reason}")
             detail = f". Reason: {'; '.join(failure_reasons)}" if failure_reasons else ""
             return f"Cognee memory graph rebuild failed for dataset(s): {failed}{detail}"
-        if running and global_rebuilding:
-            return (
-                "Cognee memory graph rebuild running for dataset(s): "
-                f"{sorted(global_rebuilding)}"
-            )
-        if global_pending:
-            return (
-                "Cognee memory graph rebuild pending for dataset(s): "
-                f"{sorted(global_pending)}"
-            )
         return None
 
     def _set_dataset_state_locked(
@@ -1410,12 +1430,31 @@ class CogneeBackgroundWorker:
         dataset_name: str,
         state: str,
         reason: str | None = None,
+        *,
+        readable: bool | None = None,
     ) -> None:
+        now = time.monotonic()
+        previous = self._dataset_readiness.get(dataset_name, {})
+        if readable is None:
+            readable = bool(previous.get("readable")) or state == "ready"
+        last_ready_at = previous.get("last_ready_at")
+        last_ready_reason = previous.get("last_ready_reason")
+        if state == "ready":
+            readable = True
+            last_ready_at = now
+            last_ready_reason = reason or "Cognee memory graph rebuild completed"
         self._dataset_readiness[dataset_name] = {
             "state": state,
             "reason": reason,
-            "updated_at": time.monotonic(),
+            "updated_at": now,
+            "readable": bool(readable),
+            "last_ready_at": last_ready_at,
+            "last_ready_reason": last_ready_reason,
         }
+
+    def _dataset_has_readable_snapshot_locked(self, dataset_name: str) -> bool:
+        readiness = self._dataset_readiness.get(dataset_name, {})
+        return bool(readiness.get("readable")) or readiness.get("state") == "ready"
 
     def _touch_dataset_rebuild_progress(
         self,
@@ -1476,7 +1515,7 @@ class CogneeBackgroundWorker:
             )
 
         if should_schedule_retry:
-            self._schedule_run_soon(float(config["retry_min_delay"]))
+            self._schedule_run_soon(float(config["retry_min_delay"]), force=True)
 
     def _mark_unfinished_rebuilds_failed_locked(
         self,
@@ -1597,7 +1636,7 @@ class CogneeBackgroundWorker:
                 should_reschedule = bool(self._dirty_datasets)
             PrintStyle.error(f"Cognee background: cognee import failed: {e}")
             if should_reschedule:
-                self._schedule_run_soon(retry_delay)
+                self._schedule_run_soon(retry_delay, force=True)
             return
 
         try:
@@ -1844,7 +1883,7 @@ class CogneeBackgroundWorker:
                 retry_delay=reschedule_delay,
             )
             if should_reschedule:
-                self._schedule_run_soon(reschedule_delay)
+                self._schedule_run_soon(reschedule_delay, force=True)
 
     async def maybe_run_pipeline(self) -> None:
         """Check if pipeline should run based on thresholds, then run if so."""
@@ -1874,34 +1913,53 @@ class CogneeBackgroundWorker:
             self._task = task
             return task
 
-    def _schedule_run_soon(self, delay: float | None = None) -> None:
+    def _schedule_run_soon(
+        self,
+        delay: float | None = None,
+        *,
+        force: bool = False,
+    ) -> None:
         """Debounce a near-immediate rebuild on the background worker loop."""
         with self._state_lock:
-            if self._run_scheduled or self._running:
+            if self._run_scheduled:
+                self._run_scheduled_force = self._run_scheduled_force or force
+                return
+            if self._running:
                 return
             self._run_scheduled = True
+            self._run_scheduled_force = force
             if delay is None:
                 delay = float(get_cognee_setting("cognee_cognify_debounce_seconds", 2))
             task = self._task
 
         loop = getattr(getattr(task, "event_loop_thread", None), "loop", None)
         if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._run_after_delay(delay), loop)
+            asyncio.run_coroutine_threadsafe(
+                self._run_after_delay(delay, force=force),
+                loop,
+            )
             return
 
         with self._state_lock:
             self._run_scheduled = False
+            self._run_scheduled_force = False
 
-    async def _run_after_delay(self, delay: float) -> None:
+    async def _run_after_delay(self, delay: float, *, force: bool = False) -> None:
         try:
             if delay > 0:
                 await asyncio.sleep(delay)
             with self._state_lock:
+                force = force or self._run_scheduled_force
                 self._run_scheduled = False
-            await self.run_pipeline()
+                self._run_scheduled_force = False
+            if force:
+                await self.run_pipeline()
+            else:
+                await self.maybe_run_pipeline()
         finally:
             with self._state_lock:
                 self._run_scheduled = False
+                self._run_scheduled_force = False
 
     def _log_rebuild_readiness(
         self,

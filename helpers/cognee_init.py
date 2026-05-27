@@ -1234,13 +1234,16 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
     dirty = sorted(str(name) for name in (worker_status.get("dirty_datasets") or []))
     readiness = worker_status.get("dataset_readiness") or {}
     blocked_states = []
+    readable_rebuild_states = []
     if isinstance(readiness, dict):
         for dataset_name, state in readiness.items():
             if not isinstance(state, dict):
                 continue
             state_name = str(state.get("state") or "")
-            if state_name and state_name != "ready":
+            if state_name and state_name != "ready" and not state.get("readable"):
                 blocked_states.append(f"{dataset_name}:{state_name}")
+            elif state_name and state_name != "ready":
+                readable_rebuild_states.append(f"{dataset_name}:{state_name}")
 
     running = bool(worker_status.get("running"))
     migration_status = "complete" if migration_completed else "incomplete"
@@ -1295,8 +1298,34 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
         else:
             unknown.append(dataset_name)
 
+    if ready:
+        try:
+            from .cognee_background import CogneeBackgroundWorker
+
+            CogneeBackgroundWorker.get_instance().mark_datasets_readable(
+                ready,
+                "Cognee startup graph readiness verified",
+            )
+            if isinstance(readiness, dict):
+                for dataset_name in ready:
+                    state = readiness.setdefault(dataset_name, {})
+                    if isinstance(state, dict):
+                        state["readable"] = True
+                        state.setdefault("state", "ready")
+        except Exception as e:
+            PrintStyle.warning(f"Could not record Cognee readable datasets: {e}")
+
+    dirty_blocking = []
+    if isinstance(readiness, dict):
+        for dataset_name in dirty:
+            state = readiness.get(dataset_name, {})
+            if not isinstance(state, dict) or not state.get("readable"):
+                dirty_blocking.append(dataset_name)
+    else:
+        dirty_blocking = dirty
+
     graph_blocked = bool(empty or errors or unknown)
-    worker_blocked = bool(running or dirty or blocked_states)
+    worker_blocked = bool(dirty_blocking or blocked_states)
     graph_total = len(ready) + len(empty) + len(errors) + len(unknown)
 
     if graph_blocked or worker_blocked:
@@ -1304,7 +1333,9 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
             "Cognee startup readiness: BLOCKED; recall may be unavailable. "
             f"graphs_ready={len(ready)}/{graph_total}; "
             f"migration={migration_status}; running={running}; "
-            f"dirty={dirty}; blocked_states={blocked_states}; "
+            f"dirty={dirty}; dirty_blocking={dirty_blocking}; "
+            f"blocked_states={blocked_states}; "
+            f"readable_rebuild_states={readable_rebuild_states}; "
             f"empty_graphs={empty}; graph_errors={_short_list(errors)}; "
             f"unknown_graphs={unknown}"
         )
@@ -1392,7 +1423,7 @@ async def _reset_cognify_status_for_datasets(
 
             worker = CogneeBackgroundWorker.get_instance()
             for name in dataset_names:
-                worker.mark_dirty(name)
+                worker.mark_dirty(name, preserve_readable=False)
             if dataset_names:
                 PrintStyle.standard(
                     f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild: {dataset_names}"
@@ -1470,7 +1501,7 @@ async def mark_all_datasets_dirty_for_rebuild(reason: str) -> None:
 
         worker = CogneeBackgroundWorker.get_instance()
         for name in dataset_names:
-            worker.mark_dirty(name, reset_retry=False)
+            worker.mark_dirty(name, reset_retry=False, preserve_readable=False)
         PrintStyle.standard(
             f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild resume "
             f"({reason}): {dataset_names}"
