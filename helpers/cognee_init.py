@@ -357,9 +357,14 @@ async def _ensure_embedding_config_state(
                 "background rebuild without resetting pipeline status again. "
                 f"current=({_format_embedding_config_state(current)})"
             )
-            await mark_all_datasets_dirty_for_rebuild(
+            queued = await mark_all_datasets_dirty_for_rebuild(
                 "pending embedding config rebuild"
             )
+            if queued is None:
+                raise RuntimeError(
+                    "Cognee embedding config rebuild is pending, but datasets "
+                    "were not queued for rebuild; leaving pending state for retry."
+                )
             _embedding_rebuild_scheduled = True
         return
 
@@ -385,7 +390,20 @@ async def _ensure_embedding_config_state(
                 f"previous=({_format_embedding_config_state(previous)}); "
                 f"current=({_format_embedding_config_state(current)})"
             )
-        await reset_cognify_status_for_all_datasets()
+        queued = await reset_cognify_status_for_all_datasets()
+        if queued is None:
+            raise RuntimeError(
+                "Cognee embedding config changed, but datasets were not queued "
+                "for rebuild; pending embedding state was not saved."
+            )
+        if not queued:
+            _save_embedding_config_state(current)
+            _clear_pending_embedding_config_state()
+            PrintStyle.standard(
+                "Cognee embedding config changed, but no datasets exist; "
+                "stored current embedding config without scheduling rebuild."
+            )
+            return
         _save_pending_embedding_config_state(current)
         _embedding_rebuild_scheduled = True
         return
@@ -637,8 +655,23 @@ async def _run_lancedb_payload_schema_migrations() -> list[dict[str, Any]]:
             migrated_count += len(result.get("migrated_collections") or [])
 
     if failed:
-        details = json.dumps(failed, ensure_ascii=False, default=str)
-        raise RuntimeError(f"Cognee LanceDB payload schema migration failed: {details}")
+        queued = await _queue_rebuild_after_lancedb_payload_migration_failure(failed)
+        if queued is None:
+            details = json.dumps(failed, ensure_ascii=False, default=str)
+            raise RuntimeError(
+                "Cognee LanceDB payload schema migration failed and datasets "
+                f"were not queued for rebuild: {details}"
+            )
+        if queued:
+            PrintStyle.warning(
+                "Cognee LanceDB payload schema migration failed; purged stale "
+                f"vector tables and queued rebuild for dataset(s): {queued}"
+            )
+        else:
+            PrintStyle.warning(
+                "Cognee LanceDB payload schema migration failed, but no datasets "
+                "exist to rebuild."
+            )
 
     if summaries:
         PrintStyle.standard(
@@ -646,6 +679,31 @@ async def _run_lancedb_payload_schema_migrations() -> list[dict[str, Any]]:
             f"(summaries={len(summaries)}, checked={checked_count}, migrated={migrated_count})"
         )
     return summaries
+
+
+async def _queue_rebuild_after_lancedb_payload_migration_failure(
+    failed_summaries: list[dict[str, Any]],
+) -> list[str] | None:
+    """Recover old incompatible LanceDB payload tables by rebuilding plugin data."""
+    queued = await reset_cognify_status_for_all_datasets()
+    if queued is None:
+        return None
+    if not queued:
+        PrintStyle.warning(
+            "Cognee LanceDB payload schema migration failed, but no datasets "
+            "exist to rebuild."
+        )
+        return []
+
+    try:
+        await purge_lancedb_vector_tables_for_dataset_names(queued)
+    except Exception as e:
+        detail = json.dumps(failed_summaries, ensure_ascii=False, default=str)
+        raise RuntimeError(
+            "Cognee LanceDB payload schema migration failed and stale vector "
+            f"tables could not be purged for rebuild: {e}; failures={detail}"
+        ) from e
+    return queued
 
 
 def _patch_lancedb_remote_table_replay_refs() -> None:
@@ -1290,10 +1348,10 @@ async def _reset_cognify_status_for_datasets(
     dataset_ids: set[str],
     *,
     reset_all: bool = False,
-) -> None:
+) -> list[str] | None:
     """Reset cognify_pipeline status and mark only affected datasets dirty."""
     if not dataset_ids:
-        return
+        return []
     try:
         import cognee
     except Exception as e:
@@ -1301,7 +1359,7 @@ async def _reset_cognify_status_for_datasets(
             f"Cannot import cognee dataset helpers: {e}. "
             f"Graph will NOT auto-rebuild -- re-add data or call cognify manually."
         )
-        return
+        return None
 
     try:
         all_datasets = await cognee.datasets.list_datasets()
@@ -1310,7 +1368,7 @@ async def _reset_cognify_status_for_datasets(
             f"Could not list datasets to reset cognify status: {e}. "
             f"Graph will NOT auto-rebuild -- re-add data or call cognify manually."
         )
-        return
+        return None
 
     requested_ids = {str(dataset_id) for dataset_id in dataset_ids}
     dataset_names: list[str] = []
@@ -1327,7 +1385,7 @@ async def _reset_cognify_status_for_datasets(
         PrintStyle.warning(
             f"No Cognee datasets matched reset request: {sorted(requested_ids)}"
         )
-        return
+        return []
 
     reset_count = await _delete_pipeline_runs_for_dataset_ids(dataset_id_values)
 
@@ -1347,10 +1405,12 @@ async def _reset_cognify_status_for_datasets(
             PrintStyle.standard(
                 f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild: {dataset_names}"
             )
+        return dataset_names
     except Exception as e:
         PrintStyle.warning(
             f"Could not mark datasets dirty (graph will rebuild on next insert instead): {e}"
         )
+        return None
 
 
 async def reset_cognify_status_for_dataset_names(dataset_names: list[str]) -> list[str]:
@@ -1387,24 +1447,24 @@ async def reset_cognify_status_for_dataset_names(dataset_names: list[str]) -> li
     return reset_names
 
 
-async def reset_cognify_status_for_all_datasets() -> None:
+async def reset_cognify_status_for_all_datasets() -> list[str] | None:
     """Reset cognify_pipeline status for every dataset and mark them dirty."""
-    await _reset_cognify_status_for_datasets({"manual_reindex"}, reset_all=True)
+    return await _reset_cognify_status_for_datasets({"manual_reindex"}, reset_all=True)
 
 
-async def mark_all_datasets_dirty_for_rebuild(reason: str) -> None:
+async def mark_all_datasets_dirty_for_rebuild(reason: str) -> list[str] | None:
     """Resume a pending rebuild without deleting Cognee pipeline progress again."""
     try:
         import cognee
     except Exception as e:
         PrintStyle.error(f"Cannot import cognee dataset helpers: {e}")
-        return
+        return None
 
     try:
         all_datasets = await cognee.datasets.list_datasets()
     except Exception as e:
         PrintStyle.error(f"Could not list datasets to resume Cognee rebuild: {e}")
-        return
+        return None
 
     dataset_names = [
         ds.name
@@ -1413,7 +1473,7 @@ async def mark_all_datasets_dirty_for_rebuild(reason: str) -> None:
     ]
     if not dataset_names:
         PrintStyle.warning("No Cognee datasets found for pending rebuild resume")
-        return
+        return []
 
     try:
         from .cognee_background import CogneeBackgroundWorker
@@ -1425,10 +1485,12 @@ async def mark_all_datasets_dirty_for_rebuild(reason: str) -> None:
             f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild resume "
             f"({reason}): {dataset_names}"
         )
+        return dataset_names
     except Exception as e:
         PrintStyle.warning(
             f"Could not mark datasets dirty for pending rebuild resume: {e}"
         )
+        return None
 
 
 async def _delete_pipeline_runs_for_dataset_ids(dataset_ids: list) -> int:

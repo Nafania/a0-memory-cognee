@@ -769,12 +769,6 @@ def _flatten_search_results(results: Any) -> list[tuple[Any, str]]:
             objects = (getattr(result, "objects_result", None)
                        or getattr(result, "result_object", None))
 
-        if objects and isinstance(objects, list):
-            before_count = len(flat)
-            _extract_nodes_to_flat(objects, str(ds), flat)
-            if len(flat) > before_count:
-                continue
-
         if (
             isinstance(result, dict)
             and ("text" in result or "content" in result)
@@ -787,29 +781,78 @@ def _flatten_search_results(results: Any) -> list[tuple[Any, str]]:
 
         sr = None
         if isinstance(result, dict):
-            sr = result.get("search_result") or result.get("context_result")
+            sr = result.get("search_result")
+            if sr is None:
+                sr = result.get("context_result")
             if sr is None:
                 sr = result.get("text")
-        elif hasattr(result, "search_result"):
-            sr = result.search_result
+        else:
+            if hasattr(result, "search_result"):
+                sr = result.search_result
+            if sr is None and hasattr(result, "context_result"):
+                sr = result.context_result
+
+        if _append_search_payload_to_flat(sr, str(ds), flat):
+            continue
+
+        if objects and isinstance(objects, list):
+            before_count = len(flat)
+            _extract_nodes_to_flat(objects, str(ds), flat)
+            if len(flat) > before_count:
+                continue
 
         if sr is None:
-            sr = result
-
-        if isinstance(sr, str) and sr.strip():
-            flat.append((sr.strip(), str(ds)))
-        elif isinstance(sr, list):
-            for item in sr:
-                if not item:
-                    continue
-                if isinstance(item, dict):
-                    flat.append((item, str(item.get("dataset_name") or item.get("dataset") or ds)))
-                else:
-                    text = str(item).strip()
-                    if text:
-                        flat.append((text, str(ds)))
+            _append_search_payload_to_flat(result, str(ds), flat)
 
     return flat
+
+
+def _append_search_payload_to_flat(
+    payload: Any,
+    dataset_name: str,
+    flat: list[tuple[Any, str]],
+) -> bool:
+    before_count = len(flat)
+    if payload is None:
+        return False
+
+    if isinstance(payload, str):
+        text = payload.strip()
+        if text:
+            flat.append((text, dataset_name))
+    elif isinstance(payload, list):
+        for item in payload:
+            if not item:
+                continue
+            if isinstance(item, dict):
+                flat.append(
+                    (
+                        item,
+                        str(
+                            item.get("dataset_name")
+                            or item.get("dataset")
+                            or dataset_name
+                        ),
+                    )
+                )
+            else:
+                text = str(item).strip()
+                if text:
+                    flat.append((text, dataset_name))
+    elif isinstance(payload, dict):
+        flat.append(
+            (
+                payload,
+                str(
+                    payload.get("dataset_name")
+                    or payload.get("dataset")
+                    or dataset_name
+                ),
+            )
+        )
+    elif hasattr(payload, "page_content") or hasattr(payload, "text"):
+        flat.append((payload, _extract_dataset_name(payload) or dataset_name))
+    return len(flat) > before_count
 
 
 def _extract_nodes_to_flat(

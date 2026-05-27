@@ -932,7 +932,7 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         self.assertEqual(deleted_ids, [affected_id])
 
-    def test_lancedb_payload_schema_migration_fails_explicitly(self):
+    def test_lancedb_payload_schema_migration_failure_queues_rebuild(self):
         cognee_init = _load_cognee_init_module()
 
         run_migrations_module = types.ModuleType("cognee.run_migrations")
@@ -943,17 +943,31 @@ class CogneeInitStartupTest(unittest.TestCase):
         run_migrations_module.run_vector_migrations = run_vector_migrations
         old_run_migrations = sys.modules.get("cognee.run_migrations")
         sys.modules["cognee.run_migrations"] = run_migrations_module
+        calls = []
+
+        async def purge(dataset_names):
+            calls.append(("purge", list(dataset_names)))
+            return list(dataset_names)
+
+        async def reset_all():
+            calls.append(("reset_all", None))
+            return ["default"]
+
+        cognee_init.purge_lancedb_vector_tables_for_dataset_names = purge
+        cognee_init.reset_cognify_status_for_all_datasets = reset_all
         try:
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "Cognee LanceDB payload schema migration failed",
-            ):
-                asyncio.run(cognee_init._run_lancedb_payload_schema_migrations())
+            summaries = asyncio.run(cognee_init._run_lancedb_payload_schema_migrations())
         finally:
             if old_run_migrations is None:
                 sys.modules.pop("cognee.run_migrations", None)
             else:
                 sys.modules["cognee.run_migrations"] = old_run_migrations
+
+        self.assertEqual(
+            summaries,
+            [{"dataset_id": "default", "provider": "lancedb", "result": "failed"}],
+        )
+        self.assertEqual(calls, [("reset_all", None), ("purge", ["default"])])
 
     def test_patches_remote_lancedb_table_replay_step_to_avoid_self_cycle(self):
         cognee_init = _load_cognee_init_module()

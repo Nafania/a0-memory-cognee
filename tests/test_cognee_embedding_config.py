@@ -90,6 +90,7 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
 
             async def reset_all():
                 reset_calls.append("reset")
+                return ["default"]
 
             module.reset_cognify_status_for_all_datasets = reset_all
 
@@ -119,6 +120,7 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
 
             async def reset_all():
                 reset_calls.append("reset")
+                return ["default"]
 
             module.reset_cognify_status_for_all_datasets = reset_all
 
@@ -151,6 +153,7 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
 
             async def reset_all():
                 reset_calls.append("reset")
+                return ["default"]
 
             module.reset_cognify_status_for_all_datasets = reset_all
 
@@ -161,6 +164,37 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
             self.assertEqual(module._load_embedding_config_state(), current)
 
         self.assertEqual(reset_calls, ["reset"])
+
+    def test_changed_embedding_config_does_not_persist_pending_when_dirty_marking_failed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module = self._load_module(tmp_dir)
+            old = {
+                "provider": "fastembed",
+                "model": "sentence-transformers/all-MiniLM-L6-v2",
+                "dimensions": "384",
+                "api_base": "",
+            }
+            current = {
+                "provider": "fastembed",
+                "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+                "dimensions": "384",
+                "api_base": "",
+            }
+            module._save_embedding_config_state(old)
+
+            async def reset_all():
+                return None
+
+            module.reset_cognify_status_for_all_datasets = reset_all
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "datasets were not queued",
+            ):
+                asyncio.run(module._ensure_embedding_config_state(current))
+
+            self.assertIsNone(module._load_pending_embedding_config_state())
+            self.assertFalse(module._embedding_rebuild_scheduled)
 
     def test_pending_embedding_rebuild_resumes_without_resetting_pipeline(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -185,9 +219,11 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
 
             async def reset_all():
                 reset_calls.append("reset")
+                return ["default"]
 
             async def resume_all(reason):
                 resume_calls.append(reason)
+                return ["default"]
 
             module.reset_cognify_status_for_all_datasets = reset_all
             module.mark_all_datasets_dirty_for_rebuild = resume_all
@@ -196,6 +232,31 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
 
         self.assertEqual(reset_calls, [])
         self.assertEqual(resume_calls, ["pending embedding config rebuild"])
+
+    def test_pending_embedding_rebuild_resume_requires_successful_dirty_marking(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module = self._load_module(tmp_dir)
+            current = {
+                "provider": "fastembed",
+                "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+                "dimensions": "384",
+                "api_base": "",
+            }
+            module._save_pending_embedding_config_state(current)
+            module._embedding_rebuild_scheduled = False
+
+            async def resume_all(reason):
+                return None
+
+            module.mark_all_datasets_dirty_for_rebuild = resume_all
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "datasets were not queued",
+            ):
+                asyncio.run(module._ensure_embedding_config_state(current))
+
+            self.assertFalse(module._embedding_rebuild_scheduled)
 
     def test_unchanged_embedding_config_does_not_rebuild(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -211,6 +272,7 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
 
             async def reset_all():
                 reset_calls.append("reset")
+                return ["default"]
 
             module.reset_cognify_status_for_all_datasets = reset_all
 

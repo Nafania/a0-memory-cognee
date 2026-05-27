@@ -1709,6 +1709,7 @@ class CogneeBackgroundWorker:
                         and not needs_pipeline_reset
                         and await _dataset_has_existing_graph(dataset)
                     ):
+                        await _close_cached_vector_engine()
                         await _purge_vector_store_for_rebuild(dataset)
                         counts = await run_cognee_operation(
                             "cognee.vector rebuild from existing graph",
@@ -1740,6 +1741,7 @@ class CogneeBackgroundWorker:
                         if needs_pipeline_reset or embedding_rebuild_needed:
                             await _reset_pipeline_status_for_rebuild(dataset)
                         if embedding_rebuild_needed:
+                            await _close_cached_vector_engine()
                             await _purge_vector_store_for_rebuild(dataset)
 
                         cognify_kwargs = {}
@@ -1846,6 +1848,14 @@ class CogneeBackgroundWorker:
                         )
                     PrintStyle.error(f"Cognee pipeline failed for dataset {dataset}", str(e))
                 finally:
+                    if dataset_started and embedding_rebuild_needed:
+                        try:
+                            await _close_cached_vector_engine()
+                        except Exception as cleanup_error:
+                            PrintStyle.warning(
+                                "Cognee vector engine cleanup failed after "
+                                f"{dataset}: {cleanup_error}"
+                            )
                     if dataset_started:
                         try:
                             _cleanup_cognee_child_processes(

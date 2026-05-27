@@ -820,6 +820,9 @@ class CogneeBackgroundTest(unittest.TestCase):
         async def purge(dataset):
             calls.append(("purge", dataset))
 
+        async def close_cached():
+            calls.append(("close_cached", None))
+
         async def vector_rebuild(dataset, **kwargs):
             calls.append(("vector_rebuild", dataset))
             self.assertIn("progress_callback", kwargs)
@@ -835,6 +838,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         background._dataset_has_existing_graph = lambda dataset: _async_value(True)
         background._purge_vector_store_for_rebuild = purge
         background._rebuild_embedding_vectors_from_existing_graph = vector_rebuild
+        background._close_cached_vector_engine = close_cached
         background._reset_pipeline_status_for_rebuild = (
             lambda dataset: calls.append(("reset", dataset))
         )
@@ -847,8 +851,15 @@ class CogneeBackgroundTest(unittest.TestCase):
         status = worker.get_status()
         self.assertTrue(status["last_run_success"])
         self.assertEqual(status["dirty_datasets"], [])
-        self.assertIn(("purge", "default"), calls)
-        self.assertIn(("vector_rebuild", "default"), calls)
+        self.assertEqual(
+            calls,
+            [
+                ("close_cached", None),
+                ("purge", "default"),
+                ("vector_rebuild", "default"),
+                ("close_cached", None),
+            ],
+        )
         self.assertNotIn(("reset", "default"), calls)
         self.assertFalse(any(call[0] == "cognify" for call in calls))
         self.assertFalse(any(call[0] == "improve" for call in calls))
@@ -916,6 +927,9 @@ class CogneeBackgroundTest(unittest.TestCase):
         async def purge(dataset):
             calls.append(("purge", dataset))
 
+        async def close_cached():
+            calls.append(("close_cached", None))
+
         async def vector_rebuild(dataset, **kwargs):
             calls.append(("vector_rebuild", dataset))
             return {"nodes": 0, "skipped_nodes": 2, "edge_types": 1}
@@ -929,6 +943,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         background._dataset_has_existing_graph = lambda dataset: _async_value(True)
         background._purge_vector_store_for_rebuild = purge
         background._rebuild_embedding_vectors_from_existing_graph = vector_rebuild
+        background._close_cached_vector_engine = close_cached
         async def reset(dataset):
             calls.append(("reset", dataset))
 
@@ -944,12 +959,16 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertEqual(
             calls,
             [
+                ("close_cached", None),
                 ("purge", "default"),
                 ("vector_rebuild", "default"),
+                ("close_cached", None),
                 ("reset", "default"),
+                ("close_cached", None),
                 ("purge", "default"),
                 ("cognify", ["default"]),
                 ("improve", "default"),
+                ("close_cached", None),
             ],
         )
         self.assertTrue(worker.get_status()["last_run_success"])
@@ -1691,8 +1710,12 @@ class CogneeBackgroundTest(unittest.TestCase):
         async def purge(dataset):
             calls.append(("purge", dataset))
 
+        async def close_cached():
+            calls.append(("close_cached", None))
+
         background._reset_pipeline_status_for_rebuild = reset
         background._purge_vector_store_for_rebuild = purge
+        background._close_cached_vector_engine = close_cached
         worker = background.CogneeBackgroundWorker()
         worker.mark_dirty("default")
 
@@ -1702,9 +1725,11 @@ class CogneeBackgroundTest(unittest.TestCase):
             calls,
             [
                 ("reset", "default"),
+                ("close_cached", None),
                 ("purge", "default"),
                 ("cognify", ["default"]),
                 ("improve", "default"),
+                ("close_cached", None),
             ],
         )
 

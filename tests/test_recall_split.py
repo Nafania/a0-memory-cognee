@@ -133,6 +133,26 @@ class RecallSplitTest(unittest.TestCase):
 
         self.assertEqual([doc.page_content for doc in docs], ["stored chunk text"])
 
+    def test_results_prefer_context_over_verbose_schema_objects(self):
+        memory = _load_memory_module()
+        schema_node = types.SimpleNamespace(
+            id="schema-node",
+            attributes={"text": "Type for application"},
+        )
+
+        docs = memory._results_to_documents(
+            [
+                {
+                    "dataset_name": "default",
+                    "context_result": "stored family memory text",
+                    "objects_result": [schema_node],
+                }
+            ],
+            limit=5,
+        )
+
+        self.assertEqual([doc.page_content for doc in docs], ["stored family memory text"])
+
     def test_recall_feedback_accepts_split_document_results(self):
         memory = _load_memory_module()
         doc = memory.Document(
