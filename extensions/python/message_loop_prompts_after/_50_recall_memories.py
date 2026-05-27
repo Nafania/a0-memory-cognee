@@ -60,12 +60,11 @@ class RecallMemories(Extension):
         if not cfg:
             return
 
-        user_instruction = (
-            loop_data.user_message.output_text() if loop_data.user_message else "None"
-        )
-        history = self.agent.history.output_text()[-cfg["memory_recall_history_len"]:]
-
-        query = user_instruction + "\n\n" + history
+        user_instruction = _message_query_text(loop_data.user_message)
+        if user_instruction:
+            query = user_instruction
+        else:
+            query = _history_query_text(self.agent.history)[-cfg["memory_recall_history_len"]:]
 
         if not query or len(query) <= 3:
             log_item.update(
@@ -91,14 +90,14 @@ class RecallMemories(Extension):
             return
 
         from usr.plugins.memory_cognee.helpers.cognee_init import get_cognee
-        cognee, _ = get_cognee()
-        from cognee.modules.engine.models.node_set import NodeSet
+        cognee, SearchType = get_cognee()
 
-        mem_node_name = [Memory.Area.MAIN.value, Memory.Area.FRAGMENTS.value]
-        sol_node_name = [Memory.Area.SOLUTIONS.value]
-        combined_node_name = mem_node_name + sol_node_name
         memory_search_limit = cfg["memory_recall_memories_max_search"]
         solution_search_limit = cfg["memory_recall_solutions_max_search"]
+        combined_search_limit = _combined_search_limit(
+            memory_search_limit,
+            solution_search_limit,
+        )
 
         try:
             session_id = getattr(self.agent.context, 'id', None)
@@ -106,14 +105,12 @@ class RecallMemories(Extension):
                 "cognee.search recall",
                 cognee.search,
                 query_text=query,
-                top_k=memory_search_limit + solution_search_limit,
+                query_type=SearchType.CHUNKS,
+                top_k=combined_search_limit,
                 datasets=datasets,
-                node_type=NodeSet,
-                node_name=combined_node_name,
                 session_id=session_id,
-                only_context=True,
-                # Cognee verbose controls result shape: objects_result carries node metadata.
-                verbose=True,
+                only_context=False,
+                verbose=False,
             )
             mem_answers, sol_answers = split_recall_answers_by_area(
                 combined_answers,
@@ -182,6 +179,13 @@ def _recall_block_heading(block_reason: str) -> str:
     return "Memory rebuild in progress; skipping recall"
 
 
+def _combined_search_limit(memory_limit: int, solution_limit: int) -> int:
+    base = max(int(memory_limit or 0), 0) + max(int(solution_limit or 0), 0)
+    if base <= 0:
+        return 1
+    return base
+
+
 def _log_unhandled_recall_exception(task: asyncio.Task) -> None:
     if task.cancelled():
         return
@@ -194,6 +198,68 @@ def _log_unhandled_recall_exception(task: asyncio.Task) -> None:
             PrintStyle.error(f"Memory recall task failed: {exc}")
         except OSError:
             pass
+
+
+def _message_query_text(message) -> str:
+    if not message:
+        return ""
+
+    content = getattr(message, "content", None)
+    text = _content_query_text(content)
+    if text:
+        return text
+
+    try:
+        return str(message.output_text() or "").strip()
+    except Exception:
+        return ""
+
+
+def _history_query_text(history) -> str:
+    try:
+        outputs = history.output()
+    except Exception:
+        try:
+            return str(history.output_text() or "").strip()
+        except Exception:
+            return ""
+
+    parts: list[str] = []
+    for item in outputs or []:
+        content = item.get("content") if isinstance(item, dict) else getattr(item, "content", None)
+        text = _content_query_text(content)
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _content_query_text(content) -> str:
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, dict):
+        for key in ("user_message", "message", "text", "preview"):
+            if key in content:
+                text = _content_query_text(content.get(key))
+                if text:
+                    return text
+
+        if "raw_content" in content:
+            text = _content_query_text(content.get("raw_content"))
+            if text:
+                return text
+
+        parts = [_content_query_text(value) for value in content.values()]
+        return "\n".join(part for part in parts if part).strip()
+
+    if isinstance(content, list):
+        parts = [_content_query_text(item) for item in content]
+        return "\n".join(part for part in parts if part).strip()
+
+    return str(content).strip()
 
 
 def _write_extras(agent, extras, memories, solutions, log_item, feedback_items):

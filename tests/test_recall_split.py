@@ -113,6 +113,111 @@ class RecallSplitTest(unittest.TestCase):
         self.assertEqual(memories, [])
         self.assertEqual([doc.page_content for doc in solutions], ["stored solution"])
 
+    def test_results_use_context_when_verbose_objects_have_no_text(self):
+        memory = _load_memory_module()
+        empty_verbose_node = types.SimpleNamespace(
+            id="chunk-node",
+            attributes={},
+        )
+
+        docs = memory._results_to_documents(
+            [
+                {
+                    "dataset_name": "default",
+                    "context_result": "stored chunk text",
+                    "objects_result": [empty_verbose_node],
+                }
+            ],
+            limit=5,
+        )
+
+        self.assertEqual([doc.page_content for doc in docs], ["stored chunk text"])
+
+    def test_recall_feedback_accepts_split_document_results(self):
+        memory = _load_memory_module()
+        doc = memory.Document(
+            page_content="stored split memory",
+            metadata={"id": "memory-id", "dataset": "default"},
+        )
+
+        texts, feedback = memory.recall_text_and_feedback_items(
+            [doc],
+            limit=5,
+            context_id="ctx",
+            fallback_dataset="fallback",
+            kind="memory",
+        )
+
+        self.assertEqual(texts, ["stored split memory"])
+        self.assertEqual(
+            feedback,
+            [
+                {
+                    "text": "stored split memory",
+                    "memory_id": "memory-id",
+                    "dataset": "default",
+                    "context_id": "ctx",
+                    "kind": "memory",
+                }
+            ],
+        )
+
+    def test_results_expand_ranked_chunk_payloads_preserving_cognee_order(self):
+        memory = _load_memory_module()
+
+        docs = memory._results_to_documents(
+            [
+                {
+                    "dataset_name": "default",
+                    "search_result": [
+                        {
+                            "text": "first ranked memory chunk",
+                            "metadata": {"area": "main"},
+                            "id": "chunk-1",
+                        },
+                        {
+                            "text": "second ranked solution chunk",
+                            "metadata": {"area": "solutions"},
+                            "id": "chunk-2",
+                        },
+                    ],
+                }
+            ],
+            limit=5,
+        )
+
+        self.assertEqual(
+            [doc.page_content for doc in docs],
+            ["first ranked memory chunk", "second ranked solution chunk"],
+        )
+        self.assertEqual([doc.metadata["id"] for doc in docs], ["chunk-1", "chunk-2"])
+        self.assertEqual([doc.metadata["dataset"] for doc in docs], ["default", "default"])
+
+        memories, solutions = memory.split_recall_answers_by_area(
+            [
+                {
+                    "dataset_name": "default",
+                    "search_result": [
+                        {
+                            "text": "first ranked memory chunk",
+                            "metadata": {"area": "main"},
+                            "id": "chunk-1",
+                        },
+                        {
+                            "text": "second ranked solution chunk",
+                            "metadata": {"area": "solutions"},
+                            "id": "chunk-2",
+                        },
+                    ],
+                }
+            ],
+            memory_limit=5,
+            solution_limit=3,
+        )
+
+        self.assertEqual([doc.page_content for doc in memories], ["first ranked memory chunk"])
+        self.assertEqual([doc.page_content for doc in solutions], ["second ranked solution chunk"])
+
 
 if __name__ == "__main__":
     unittest.main()

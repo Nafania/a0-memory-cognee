@@ -18,13 +18,40 @@ class FakeLogItem:
 
 
 class FakeHistory:
+    def output(self):
+        return [
+            {
+                "ai": False,
+                "content": {
+                    "system_message": [],
+                    "user_message": "previous raw user message",
+                    "attachments": [],
+                },
+            },
+            {
+                "ai": True,
+                "content": {
+                    "response": "previous assistant response",
+                },
+            },
+        ]
+
     def output_text(self):
         return "previous conversation about cognee recall"
 
 
 class FakeMessage:
+    content = {
+        "system_message": [],
+        "user_message": "debug memory search",
+        "attachments": [],
+    }
+
     def output_text(self):
-        return "debug memory search"
+        return (
+            'human: {"system_message": [], "user_message": '
+            '"debug memory search", "attachments": []}'
+        )
 
 
 class FakeAgent:
@@ -46,10 +73,15 @@ class FakeAgent:
         self._data[name] = value
 
 
+_DEFAULT_USER_MESSAGE = object()
+
+
 class FakeLoopData:
-    def __init__(self):
+    def __init__(self, user_message=_DEFAULT_USER_MESSAGE):
         self.extras_persistent = {}
-        self.user_message = FakeMessage()
+        self.user_message = (
+            FakeMessage() if user_message is _DEFAULT_USER_MESSAGE else user_message
+        )
         self.iteration = 0
 
 
@@ -77,6 +109,7 @@ class FakeMemory:
         SOLUTIONS = AreaValue("solutions")
 
     dataset_name = "default"
+    memory_subdir = "default"
 
     @staticmethod
     async def get(agent):
@@ -167,7 +200,10 @@ def _install_stubs(
     memory.recall_text_and_feedback_items = recall_text_and_feedback_items
 
     cognee_init = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_init")
-    cognee_init.get_cognee = lambda: (fake_cognee, None)
+    cognee_init.get_cognee = lambda: (
+        fake_cognee,
+        types.SimpleNamespace(CHUNKS="CHUNKS"),
+    )
 
     background = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_background")
 
@@ -252,14 +288,52 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(fake_cognee.search_calls), 1)
         call = fake_cognee.search_calls[0]
+        self.assertEqual(call["query_type"], "CHUNKS")
         self.assertEqual(call["top_k"], 20)
         self.assertEqual(call["datasets"], ["default"])
-        self.assertEqual(call["node_name"], ["main", "fragments", "solutions"])
-        self.assertIs(call["verbose"], True)
-        self.assertEqual(split_calls, [(["combined-results"], 12, 8)])
+        self.assertNotIn("node_type", call)
+        self.assertNotIn("node_name", call)
+        self.assertIs(call["only_context"], False)
+        self.assertIs(call["verbose"], False)
+        self.assertIn("debug memory search", call["query_text"])
+        self.assertNotIn("previous raw user message", call["query_text"])
+        self.assertNotIn("system_message", call["query_text"])
+        self.assertNotIn("attachments", call["query_text"])
+        self.assertEqual(
+            split_calls,
+            [
+                (["combined-results"], 12, 8),
+            ],
+        )
         self.assertIn("memories", loop_data.extras_persistent)
         self.assertIn("solutions", loop_data.extras_persistent)
         self.assertEqual(log_item.fields["heading"], "1 memories and 1 relevant solutions found")
+
+    async def test_recall_query_uses_raw_user_message_not_prompt_wrapper(self):
+        fake_cognee = FakeCognee()
+        split_calls = []
+        module = _load_recall_module(fake_cognee, split_calls)
+
+        extension = module.RecallMemories()
+        extension.agent = FakeAgent()
+        await extension.search_memories(FakeLogItem(), FakeLoopData())
+
+        query = fake_cognee.search_calls[0]["query_text"]
+        self.assertEqual(query, "debug memory search")
+        self.assertNotIn('"user_message"', query)
+
+    async def test_recall_query_uses_history_only_when_current_message_missing(self):
+        fake_cognee = FakeCognee()
+        split_calls = []
+        module = _load_recall_module(fake_cognee, split_calls)
+
+        extension = module.RecallMemories()
+        extension.agent = FakeAgent()
+        await extension.search_memories(FakeLogItem(), FakeLoopData(user_message=None))
+
+        query = fake_cognee.search_calls[0]["query_text"]
+        self.assertIn("previous raw user message", query)
+        self.assertIn("previous assistant response", query)
 
     async def test_recall_skips_search_while_rebuild_not_ready(self):
         fake_cognee = FakeCognee()
@@ -320,7 +394,7 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("search backend down", log_item.fields["content"])
         self.assertEqual(loop_data.extras_persistent, {})
 
-    async def test_recall_keeps_verbose_result_shape_for_metadata(self):
+    async def test_recall_uses_raw_ranked_chunks_result_shape(self):
         fake_cognee = FakeCognee()
         split_calls = []
         module = _load_recall_module(fake_cognee, split_calls)
@@ -330,7 +404,8 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
         await extension.search_memories(FakeLogItem(), FakeLoopData())
 
         self.assertEqual(len(fake_cognee.search_calls), 1)
-        self.assertIs(fake_cognee.search_calls[0]["verbose"], True)
+        self.assertEqual(fake_cognee.search_calls[0]["query_type"], "CHUNKS")
+        self.assertIs(fake_cognee.search_calls[0]["verbose"], False)
 
     async def test_execute_reuses_inflight_recall_task(self):
         fake_cognee = FakeCognee()

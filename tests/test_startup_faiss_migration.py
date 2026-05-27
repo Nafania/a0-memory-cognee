@@ -17,12 +17,17 @@ def _load_cognee_init_module(
     dotenv = types.ModuleType("helpers.dotenv")
     files = types.ModuleType("helpers.files")
     settings = types.ModuleType("helpers.settings")
+    plugins = types.ModuleType("helpers.plugins")
     print_style = types.ModuleType("helpers.print_style")
 
     dotenv.load_dotenv = lambda: None
     dotenv.get_dotenv_value = lambda key, default=None: default
     files.get_abs_path = lambda *parts: "/tmp/" + "/".join(parts)
     settings.get_settings = lambda: {"api_keys": {}}
+    plugins.get_enabled_plugins = lambda agent=None: ["_memory", "memory_cognee"]
+    plugins.toggle_plugin = lambda plugin_name, enabled, **kwargs: order.append(
+        f"toggle:{plugin_name}:{enabled}"
+    )
 
     class PrintStyle:
         @staticmethod
@@ -84,6 +89,7 @@ def _load_cognee_init_module(
             "helpers.dotenv": dotenv,
             "helpers.files": files,
             "helpers.settings": settings,
+            "helpers.plugins": plugins,
             "helpers.print_style": print_style,
             "usr.plugins.memory_cognee.helpers.cognee_background": background,
             "usr.plugins.memory_cognee.helpers.faiss_migration": faiss_migration,
@@ -120,12 +126,18 @@ class StartupFaissMigrationTest(unittest.TestCase):
 
         async def init_cognee():
             order.append("init")
+            module._cognee_module = object()
+            module._init_done = True
 
         module.init_cognee = init_cognee
 
         module.run_memory_cognee_init_a0_extension()
 
-        self.assertEqual(order, ["configure", "init", "migrate", "start"])
+        self.assertEqual(order, ["toggle:_memory:False", "configure", "init", "migrate"])
+        module.run_memory_cognee_start_worker_extension()
+        self.assertEqual(
+            order, ["toggle:_memory:False", "configure", "init", "migrate", "start"]
+        )
 
     def test_init_a0_starts_worker_without_synchronous_rebuild(self):
         order: list[str] = []
@@ -135,11 +147,39 @@ class StartupFaissMigrationTest(unittest.TestCase):
 
         async def init_cognee():
             order.append("init")
+            module._cognee_module = object()
+            module._init_done = True
 
         module.init_cognee = init_cognee
 
         module.run_memory_cognee_init_a0_extension()
 
+        self.assertEqual(order, ["toggle:_memory:False", "configure", "init", "migrate"])
+        module.run_memory_cognee_start_worker_extension()
+        self.assertEqual(
+            order, ["toggle:_memory:False", "configure", "init", "migrate", "start"]
+        )
+
+    def test_init_a0_skips_builtin_memory_toggle_when_already_disabled(self):
+        order: list[str] = []
+        module = _load_cognee_init_module(order)
+
+        from helpers import plugins
+
+        plugins.get_enabled_plugins = lambda agent=None: ["memory_cognee"]
+        module.configure_cognee = lambda: order.append("configure")
+
+        async def init_cognee():
+            order.append("init")
+            module._cognee_module = object()
+            module._init_done = True
+
+        module.init_cognee = init_cognee
+
+        module.run_memory_cognee_init_a0_extension()
+
+        self.assertEqual(order, ["configure", "init", "migrate"])
+        module.run_memory_cognee_start_worker_extension()
         self.assertEqual(order, ["configure", "init", "migrate", "start"])
 
     def test_init_extension_runs_before_agent_zero_components(self):
@@ -156,6 +196,12 @@ class StartupFaissMigrationTest(unittest.TestCase):
         )
         self.assertFalse(
             (base / "run_ui" / "init_a0" / "end" / "_20_init_cognee.py").exists()
+        )
+        self.assertTrue(
+            (base / "__main__" / "init_a0" / "end" / "_90_start_cognee_worker.py").exists()
+        )
+        self.assertTrue(
+            (base / "run_ui" / "init_a0" / "end" / "_90_start_cognee_worker.py").exists()
         )
 
     def test_reset_cognify_status_does_not_mark_dirty_without_reset(self):

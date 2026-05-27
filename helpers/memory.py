@@ -256,6 +256,8 @@ class Memory:
         raise_unavailable: bool = False,
     ) -> list[Document]:
         node_names = _parse_filter_to_node_names(filter)
+        if not node_names:
+            node_names = _default_memory_node_names()
         datasets = self.get_search_datasets() if include_default else [self.dataset_name]
         from .cognee_background import CogneeBackgroundWorker
 
@@ -278,7 +280,7 @@ class Memory:
                 top_k=limit,
                 datasets=datasets,
                 node_type=NodeSet,
-                node_name=node_names if node_names else None,
+                node_name=node_names,
                 session_id=session_id,
                 only_context=True,
                 # Cognee verbose controls result shape: objects_result carries node metadata.
@@ -541,6 +543,10 @@ def _parse_filter_to_node_names(filter_str: str) -> list[str]:
     return node_names
 
 
+def _default_memory_node_names() -> list[str]:
+    return [area.value for area in Memory.Area]
+
+
 def recall_text_and_feedback_items(
     answers: Any,
     limit: int,
@@ -580,8 +586,8 @@ def split_recall_answers_by_area(
     memory_limit: int,
     solution_limit: int,
 ) -> tuple[list[Document], list[Document]]:
-    """Split one broad recall result into normal memories and solutions."""
-    docs = _results_to_documents(answers or [], memory_limit + solution_limit)
+    """Split Cognee-ranked recall results into normal memories and solutions."""
+    docs = _deduplicate_documents(_results_to_documents(answers or [], None))
     memories: list[Document] = []
     solutions: list[Document] = []
 
@@ -614,7 +620,7 @@ def _normalize_area(raw: Any) -> str:
     return area if area in valid else ""
 
 
-def _results_to_documents(results: Any, limit: int) -> list[Document]:
+def _results_to_documents(results: Any, limit: int | None) -> list[Document]:
     docs = []
     if not results:
         return docs
@@ -622,7 +628,7 @@ def _results_to_documents(results: Any, limit: int) -> list[Document]:
     flat = _flatten_search_results(results)
 
     for item, dataset_name in flat:
-        if len(docs) >= limit:
+        if limit is not None and len(docs) >= limit:
             break
 
         content = ""
@@ -670,11 +676,15 @@ def _flatten_search_results(results: Any) -> list[tuple[Any, str]]:
         return flat
 
     for result in results:
+        if hasattr(result, "page_content") or hasattr(result, "text"):
+            flat.append((result, _extract_dataset_name(result)))
+            continue
+
         ds = ""
         objects = None
 
         if isinstance(result, dict):
-            ds = result.get("dataset_name", "") or ""
+            ds = result.get("dataset_name", "") or result.get("dataset", "") or ""
             objects = result.get("objects_result")
         elif hasattr(result, "dataset_name"):
             ds = str(getattr(result, "dataset_name", "") or "")
@@ -682,7 +692,19 @@ def _flatten_search_results(results: Any) -> list[tuple[Any, str]]:
                        or getattr(result, "result_object", None))
 
         if objects and isinstance(objects, list):
+            before_count = len(flat)
             _extract_nodes_to_flat(objects, str(ds), flat)
+            if len(flat) > before_count:
+                continue
+
+        if (
+            isinstance(result, dict)
+            and ("text" in result or "content" in result)
+            and "search_result" not in result
+            and "context_result" not in result
+            and "objects_result" not in result
+        ):
+            flat.append((result, str(ds)))
             continue
 
         sr = None
@@ -699,9 +721,15 @@ def _flatten_search_results(results: Any) -> list[tuple[Any, str]]:
         if isinstance(sr, str) and sr.strip():
             flat.append((sr.strip(), str(ds)))
         elif isinstance(sr, list):
-            joined = "\n".join(str(item).strip() for item in sr if item)
-            if joined.strip():
-                flat.append((joined.strip(), str(ds)))
+            for item in sr:
+                if not item:
+                    continue
+                if isinstance(item, dict):
+                    flat.append((item, str(item.get("dataset_name") or item.get("dataset") or ds)))
+                else:
+                    text = str(item).strip()
+                    if text:
+                        flat.append((text, str(ds)))
 
     return flat
 

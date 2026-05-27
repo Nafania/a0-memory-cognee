@@ -255,6 +255,44 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
             self.assertEqual(len(fake_cognee.search_calls), 1)
             self.assertIs(fake_cognee.search_calls[0]["verbose"], True)
 
+    def test_similarity_search_defaults_to_memory_node_sets(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+
+            class NodeSet:
+                pass
+
+            node_set_module = types.ModuleType("cognee.modules.engine.models.node_set")
+            node_set_module.NodeSet = NodeSet
+            sys.modules["cognee.modules.engine.models.node_set"] = node_set_module
+
+            class FakeCognee:
+                def __init__(self):
+                    self.search_calls = []
+
+                async def search(self, **kwargs):
+                    self.search_calls.append(kwargs)
+                    return [{"search_result": "stored memory", "dataset_name": "default"}]
+
+            fake_cognee = FakeCognee()
+            memory_module._get_cognee = lambda: (fake_cognee, None)
+
+            memory = memory_module.Memory("default", "default")
+            asyncio.run(
+                memory.search_similarity_threshold(
+                    query="test",
+                    limit=5,
+                    threshold=0.7,
+                    filter="",
+                )
+            )
+
+            self.assertEqual(
+                fake_cognee.search_calls[0]["node_name"],
+                ["main", "fragments", "solutions"],
+            )
+
     def test_similarity_search_serializes_cognee_search_calls(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker = FakeDirtyWorker()
