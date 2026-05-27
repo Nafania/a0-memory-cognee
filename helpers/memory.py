@@ -43,7 +43,18 @@ def parse_node_set_area(raw_node_set) -> str:
         except (json.JSONDecodeError, ValueError):
             return ns.strip().lower()
     if isinstance(ns, list) and ns:
-        return str(ns[0]).strip().lower()
+        first = ns[0]
+        if isinstance(first, dict):
+            for key in ("name", "label", "value"):
+                if first.get(key):
+                    return str(first[key]).strip().lower()
+        if hasattr(first, "name") and getattr(first, "name"):
+            return str(getattr(first, "name")).strip().lower()
+        return str(first).strip().lower()
+    if isinstance(ns, dict):
+        for key in ("name", "label", "value"):
+            if ns.get(key):
+                return str(ns[key]).strip().lower()
     return str(ns).strip().lower()
 
 
@@ -605,7 +616,7 @@ def split_recall_answers_by_area(
 
 def _document_area(doc: Document) -> str:
     metadata = getattr(doc, "metadata", {}) or {}
-    for key in ("area", "node_set", "node_name"):
+    for key in _area_metadata_keys():
         raw = metadata.get(key)
         if raw:
             area = _normalize_area(raw)
@@ -617,7 +628,58 @@ def _document_area(doc: Document) -> str:
 def _normalize_area(raw: Any) -> str:
     area = parse_node_set_area(raw)
     valid = {item.value for item in Memory.Area}
-    return area if area in valid else ""
+    if area in valid:
+        return area
+    if isinstance(area, str):
+        for part in area.replace("[", "").replace("]", "").split(","):
+            candidate = part.strip().strip("'\"").lower()
+            if candidate in valid:
+                return candidate
+    return ""
+
+
+def _area_metadata_keys() -> tuple[str, ...]:
+    return (
+        "area",
+        "node_set",
+        "node_name",
+        "belongs_to_set",
+        "source_node_set",
+        "nodeSet",
+        "sourceNodeSet",
+    )
+
+
+def _copy_recall_metadata(source: Any, metadata: dict[str, Any]) -> None:
+    if not isinstance(source, dict):
+        return
+
+    nested_metadata = source.get("metadata")
+    if isinstance(nested_metadata, dict):
+        metadata.update(nested_metadata)
+
+    for key in _area_metadata_keys() + ("type", "score"):
+        if source.get(key) is not None:
+            metadata[key] = source[key]
+
+    if source.get("id"):
+        metadata["id"] = str(source["id"])
+
+
+def _content_from_recall_dict(item: dict[str, Any]) -> str:
+    for key in ("text", "content", "completion", "summary", "answer"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    for nested_key in ("payload", "raw"):
+        nested = item.get(nested_key)
+        if isinstance(nested, dict):
+            content = _content_from_recall_dict(nested)
+            if content:
+                return content
+
+    return ""
 
 
 def _results_to_documents(results: Any, limit: int | None) -> list[Document]:
@@ -637,17 +699,20 @@ def _results_to_documents(results: Any, limit: int | None) -> list[Document]:
         if isinstance(item, str):
             content = item
         elif isinstance(item, dict):
-            content = item.get("text", item.get("content", ""))
-            raw_metadata = item.get("metadata")
-            if isinstance(raw_metadata, dict):
-                metadata.update(raw_metadata)
-            if item.get("id"):
-                metadata["id"] = str(item["id"])
-            for key in ("area", "node_set", "node_name", "type"):
-                if item.get(key) is not None:
-                    metadata[key] = item[key]
+            content = _content_from_recall_dict(item)
+            _copy_recall_metadata(item, metadata)
+            for nested_key in ("payload", "raw"):
+                _copy_recall_metadata(item.get(nested_key), metadata)
         elif hasattr(item, "text"):
             content = str(item.text)
+            raw_metadata = getattr(item, "metadata", {})
+            if isinstance(raw_metadata, dict):
+                metadata.update(raw_metadata)
+            _copy_recall_metadata(getattr(item, "raw", None), metadata)
+            if getattr(item, "id", None):
+                metadata["id"] = str(getattr(item, "id"))
+            if getattr(item, "score", None) is not None:
+                metadata["score"] = getattr(item, "score")
         elif hasattr(item, "page_content"):
             content = item.page_content
             metadata = getattr(item, "metadata", {})
@@ -777,7 +842,7 @@ def _extract_nodes_to_flat(
 
 
 def _area_from_node_attrs(attrs: dict[str, Any]) -> str:
-    for key in ("area", "node_set", "node_name"):
+    for key in _area_metadata_keys():
         raw = attrs.get(key)
         if raw:
             area = _normalize_area(raw)

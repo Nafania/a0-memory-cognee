@@ -218,6 +218,46 @@ class RecallSplitTest(unittest.TestCase):
         self.assertEqual([doc.page_content for doc in memories], ["first ranked memory chunk"])
         self.assertEqual([doc.page_content for doc in solutions], ["second ranked solution chunk"])
 
+    def test_split_uses_cognee_chunk_belongs_to_set_metadata(self):
+        memory = _load_memory_module()
+
+        memories, solutions = memory.split_recall_answers_by_area(
+            [
+                {
+                    "text": "chunk text stored in solution area",
+                    "belongs_to_set": ["solutions"],
+                    "id": "chunk-solution",
+                }
+            ],
+            memory_limit=5,
+            solution_limit=3,
+        )
+
+        self.assertEqual(memories, [])
+        self.assertEqual([doc.page_content for doc in solutions], [
+            "chunk text stored in solution area"
+        ])
+
+    def test_split_uses_normalized_chunk_raw_metadata(self):
+        memory = _load_memory_module()
+        result = types.SimpleNamespace(
+            text="normalized chunk text stored in solution area",
+            metadata={},
+            raw={"belongs_to_set": ["solutions"]},
+            dataset_name="default",
+        )
+
+        memories, solutions = memory.split_recall_answers_by_area(
+            [result],
+            memory_limit=5,
+            solution_limit=3,
+        )
+
+        self.assertEqual(memories, [])
+        self.assertEqual([doc.page_content for doc in solutions], [
+            "normalized chunk text stored in solution area"
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
