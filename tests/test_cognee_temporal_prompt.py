@@ -1,4 +1,5 @@
 import importlib.util
+import logging
 import os
 import sys
 import types
@@ -115,6 +116,16 @@ class CogneeTemporalPromptTest(unittest.TestCase):
 
         self.assertTrue(cognee_init.get_cognee_setting("cognee_debug_enabled", False))
 
+    def test_get_cognee_setting_reads_env_override(self):
+        cognee_init = _load_cognee_init_module()
+        cognee_init.dotenv.get_dotenv_value = (
+            lambda key, default=None: "true"
+            if key == "A0_SET_cognee_debug_enabled"
+            else default
+        )
+
+        self.assertTrue(cognee_init.get_cognee_setting("cognee_debug_enabled", False))
+
     def test_cognee_logging_defaults_to_warning(self):
         cognee_init = _load_cognee_init_module()
 
@@ -133,6 +144,58 @@ class CogneeTemporalPromptTest(unittest.TestCase):
         cognee_init._configure_cognee_logging()
 
         self.assertEqual(os.environ["LOG_LEVEL"], "DEBUG")
+
+    def test_cognee_debug_mode_keeps_raw_request_loggers_at_warning(self):
+        cognee_init = _load_cognee_init_module()
+        cognee_init.get_cognee_setting = (
+            lambda name, default=None: True
+            if name == "cognee_debug_enabled"
+            else default
+        )
+
+        cognee_init._configure_cognee_logging()
+
+        self.assertEqual(logging.getLogger("cognee").level, logging.DEBUG)
+        self.assertEqual(logging.getLogger("instructor").level, logging.WARNING)
+        self.assertEqual(
+            logging.getLogger("cognee.shared.logging_utils").level,
+            logging.WARNING,
+        )
+
+    def test_cognee_log_redaction_masks_api_keys(self):
+        cognee_init = _load_cognee_init_module()
+
+        redacted = cognee_init._redact_log_text(
+            "new_kwargs={'api_key': '" + "sk-" + "proj-secret_123', "
+            "'llm_api_key': '" + "sk-" + "othersecret'}"
+        )
+
+        self.assertNotIn("sk-" + "proj-secret_123", redacted)
+        self.assertNotIn("sk-" + "othersecret", redacted)
+        self.assertIn("'api_key': '***", redacted)
+        self.assertIn("'llm_api_key': '***", redacted)
+
+    def test_cognee_log_redaction_preserves_structured_records(self):
+        cognee_init = _load_cognee_init_module()
+        record = logging.LogRecord(
+            name="cognee.shared.logging_utils",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg={
+                "event": "Empty context was provided to the completion",
+                "logger": "GraphCompletionRetriever",
+                "api_key": "sk-" + "proj-secret_123",
+            },
+            args=(),
+            exc_info=None,
+        )
+
+        cognee_init._SecretRedactionFilter().filter(record)
+
+        self.assertIsInstance(record.msg, dict)
+        self.assertEqual(record.msg["event"], "Empty context was provided to the completion")
+        self.assertEqual(record.msg["api_key"], "***")
 
 
 if __name__ == "__main__":

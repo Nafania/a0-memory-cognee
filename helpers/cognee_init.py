@@ -3,6 +3,10 @@ import logging
 import importlib
 import threading
 import asyncio
+import json
+import shutil
+import uuid
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -18,7 +22,6 @@ _COGNEE_DEFAULTS: dict[str, Any] = {
     "cognee_search_types": "GRAPH_COMPLETION",
     "cognee_multi_search_enabled": True,
     "cognee_cognify_interval": 5,
-    "cognee_cognify_after_n_inserts": 10,
     "cognee_temporal_enabled": True,
     "cognee_memify_enabled": True,
     "cognee_feedback_enabled": True,
@@ -49,6 +52,9 @@ _PROVIDER_MAP: dict[str, str] = {
 
 _EMBED_DIMENSIONS: dict[str, int] = {
     "sentence-transformers/all-MiniLM-L6-v2": 384,
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": 384,
+    "sentence-transformers/paraphrase-multilingual-mpnet-base-v2": 768,
+    "intfloat/multilingual-e5-large": 1024,
     "BAAI/bge-small-en-v1.5": 384,
     "BAAI/bge-base-en-v1.5": 768,
     "BAAI/bge-large-en-v1.5": 1024,
@@ -64,6 +70,77 @@ _cognee_module = None
 _search_type_class = None
 
 _LANCEDB_OPTIMIZE_FILE_THRESHOLD = 512
+_EMBEDDING_CONFIG_STATE_FILE = "embedding_config_state.json"
+_EMBEDDING_CONFIG_PENDING_FILE = "embedding_config_pending.json"
+_LEGACY_DEFAULT_EMBEDDING_CONFIG: dict[str, str] = {
+    "provider": "fastembed",
+    "model": "sentence-transformers/all-MiniLM-L6-v2",
+    "dimensions": "384",
+    "api_base": "",
+}
+_embedding_rebuild_scheduled = False
+
+_SECRET_VALUE_RE = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
+_SECRET_FIELD_RE = re.compile(
+    r"((?:api[_-]?key|llm_api_key|embedding_api_key)[\"']?\s*[:=]\s*[\"']?)([^\"'\s,}]+)",
+    re.IGNORECASE,
+)
+
+
+def _redact_log_text(text: str) -> str:
+    redacted = _SECRET_FIELD_RE.sub(r"\1***", str(text))
+    return _SECRET_VALUE_RE.sub("sk-***", redacted)
+
+
+def _is_secret_log_key(key: Any) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return normalized in {"api_key", "llm_api_key", "embedding_api_key"} or normalized.endswith(
+        "_api_key"
+    )
+
+
+def _redact_log_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_log_text(value)
+    if isinstance(value, dict):
+        return {
+            key: "***" if _is_secret_log_key(key) else _redact_log_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_redact_log_value(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_log_value(item) for item in value]
+    return value
+
+
+class _SecretRedactionFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.msg, (dict, list, tuple)):
+                record.msg = _redact_log_value(record.msg)
+                record.args = _redact_log_value(record.args)
+            else:
+                record.msg = _redact_log_text(record.getMessage())
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+def _ensure_secret_redaction_filter(logger: logging.Logger) -> None:
+    if any(isinstance(existing, _SecretRedactionFilter) for existing in logger.filters):
+        return
+    logger.addFilter(_SecretRedactionFilter())
+
+
+def reset_cognee_init_state() -> None:
+    """Reset cached Cognee module state before reconfiguring the plugin."""
+    global _configured, _cognee_module, _search_type_class
+
+    _configured = False
+    _cognee_module = None
+    _search_type_class = None
 
 
 def get_cognee_setting(name: str, default: T) -> T:
@@ -119,6 +196,7 @@ def _configure_cognee_logging() -> None:
         os.environ.setdefault("LITELLM_SET_VERBOSE", "False")
 
     level = getattr(logging, level_name, logging.WARNING)
+    _ensure_secret_redaction_filter(logging.getLogger())
     for logger_name in (
         "cognee",
         "GraphCompletionRetriever",
@@ -129,7 +207,19 @@ def _configure_cognee_logging() -> None:
         "openai",
         "urllib3",
     ):
-        logging.getLogger(logger_name).setLevel(level)
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(level)
+        _ensure_secret_redaction_filter(logger)
+
+    # These libraries can dump full LLM request kwargs, including api_key, in
+    # debug mode. Plugin debug UI traces stay enabled without raw secret logs.
+    for logger_name in (
+        "instructor",
+        "cognee.shared.logging_utils",
+    ):
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.WARNING)
+        _ensure_secret_redaction_filter(logger)
 
 
 def _map_provider(a0_provider: str) -> str:
@@ -204,6 +294,210 @@ def _configure_temporal_graph_prompt() -> None:
         os.environ[env_key] = prompt_path
     else:
         PrintStyle.warning(f"Cognee temporal prompt not found: {prompt_path}")
+
+
+def _embedding_config_state_path(filename: str = _EMBEDDING_CONFIG_STATE_FILE) -> str:
+    data_dir = files.get_abs_path(get_cognee_setting("cognee_data_dir", "usr/cognee"))
+    return os.path.join(data_dir, "a0_state", filename)
+
+
+def _current_embedding_config_state() -> dict[str, str]:
+    return {
+        "provider": os.environ.get("EMBEDDING_PROVIDER", ""),
+        "model": os.environ.get("EMBEDDING_MODEL", ""),
+        "dimensions": os.environ.get("EMBEDDING_DIMENSIONS", ""),
+        "api_base": os.environ.get("EMBEDDING_API_BASE", ""),
+    }
+
+
+def _load_embedding_config_state() -> dict[str, str] | None:
+    path = _embedding_config_state_path()
+    return _load_embedding_config_state_file(path)
+
+
+def _load_pending_embedding_config_state() -> dict[str, str] | None:
+    path = _embedding_config_state_path(_EMBEDDING_CONFIG_PENDING_FILE)
+    return _load_embedding_config_state_file(path)
+
+
+def _load_embedding_config_state_file(path: str) -> dict[str, str] | None:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        PrintStyle.warning(f"Could not read Cognee embedding config state: {e}")
+        return None
+
+    if not isinstance(value, dict):
+        PrintStyle.warning(
+            f"Ignoring invalid Cognee embedding config state at {path}: not an object"
+        )
+        return None
+
+    return {
+        "provider": str(value.get("provider") or ""),
+        "model": str(value.get("model") or ""),
+        "dimensions": str(value.get("dimensions") or ""),
+        "api_base": str(value.get("api_base") or ""),
+    }
+
+
+def _save_embedding_config_state(state: dict[str, str]) -> None:
+    _save_embedding_config_state_file(
+        _embedding_config_state_path(),
+        state,
+    )
+
+
+def _save_pending_embedding_config_state(state: dict[str, str]) -> None:
+    _save_embedding_config_state_file(
+        _embedding_config_state_path(_EMBEDDING_CONFIG_PENDING_FILE),
+        state,
+    )
+
+
+def _save_embedding_config_state_file(path: str, state: dict[str, str]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp_path, path)
+
+
+def _clear_pending_embedding_config_state() -> None:
+    path = _embedding_config_state_path(_EMBEDDING_CONFIG_PENDING_FILE)
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def _format_embedding_config_state(state: dict[str, str] | None) -> str:
+    if not state:
+        return "unknown"
+    return (
+        f"provider={state.get('provider') or ''}, "
+        f"model={state.get('model') or ''}, "
+        f"dimensions={state.get('dimensions') or ''}, "
+        f"api_base={state.get('api_base') or ''}"
+    )
+
+
+def _embedding_config_rebuild_needed(
+    current: dict[str, str] | None = None,
+) -> bool:
+    current = current or _current_embedding_config_state()
+    if not current.get("provider") or not current.get("model"):
+        return False
+
+    pending = _load_pending_embedding_config_state()
+    if pending == current:
+        return True
+
+    previous = _load_embedding_config_state()
+    unknown_nonlegacy = previous is None and current != _LEGACY_DEFAULT_EMBEDDING_CONFIG
+    changed = previous is not None and previous != current
+    return unknown_nonlegacy or changed
+
+
+async def _ensure_embedding_config_state(
+    current: dict[str, str] | None = None,
+) -> None:
+    global _embedding_rebuild_scheduled
+    current = current or _current_embedding_config_state()
+    if not current.get("provider") or not current.get("model"):
+        PrintStyle.warning(
+            "Cognee embedding config state not updated: embedding provider/model is empty"
+        )
+        return
+
+    previous = _load_embedding_config_state()
+    pending = _load_pending_embedding_config_state()
+    if pending == current:
+        if not _embedding_rebuild_scheduled:
+            PrintStyle.warning(
+                "Cognee embedding config rebuild is already pending; resuming "
+                "background rebuild without resetting pipeline status again. "
+                f"current=({_format_embedding_config_state(current)})"
+            )
+            queued = await mark_all_datasets_dirty_for_rebuild(
+                "pending embedding config rebuild"
+            )
+            if queued is None:
+                raise RuntimeError(
+                    "Cognee embedding config rebuild is pending, but datasets "
+                    "were not queued for rebuild; leaving pending state for retry."
+                )
+            _embedding_rebuild_scheduled = True
+        return
+
+    if previous == current:
+        _clear_pending_embedding_config_state()
+        return
+
+    unknown_nonlegacy = previous is None and current != _LEGACY_DEFAULT_EMBEDDING_CONFIG
+    changed = previous is not None and previous != current
+    if unknown_nonlegacy or changed:
+        if _embedding_rebuild_scheduled and pending == current:
+            return
+        if previous is None:
+            PrintStyle.warning(
+                "Cognee embedding config provenance is unknown and current config is "
+                "not the legacy default; scheduling full memory graph rebuild. "
+                f"current=({_format_embedding_config_state(current)})"
+            )
+        else:
+            PrintStyle.warning(
+                "Cognee embedding config changed; scheduling full memory graph "
+                "rebuild before recall can use the new vectors. "
+                f"previous=({_format_embedding_config_state(previous)}); "
+                f"current=({_format_embedding_config_state(current)})"
+            )
+        queued = await reset_cognify_status_for_all_datasets()
+        if queued is None:
+            raise RuntimeError(
+                "Cognee embedding config changed, but datasets were not queued "
+                "for rebuild; pending embedding state was not saved."
+            )
+        if not queued:
+            _save_embedding_config_state(current)
+            _clear_pending_embedding_config_state()
+            PrintStyle.standard(
+                "Cognee embedding config changed, but no datasets exist; "
+                "stored current embedding config without scheduling rebuild."
+            )
+            return
+        _save_pending_embedding_config_state(current)
+        _embedding_rebuild_scheduled = True
+        return
+
+    _save_embedding_config_state(current)
+    _clear_pending_embedding_config_state()
+
+
+def _mark_embedding_config_rebuild_completed() -> None:
+    pending = _load_pending_embedding_config_state()
+    if not pending:
+        return
+    current = _current_embedding_config_state()
+    if current.get("provider") and current.get("model") and current != pending:
+        PrintStyle.warning(
+            "Cognee embedding rebuild completed, but pending embedding config no "
+            "longer matches current config; leaving pending state for next startup. "
+            f"pending=({_format_embedding_config_state(pending)}); "
+            f"current=({_format_embedding_config_state(current)})"
+        )
+        return
+
+    _save_embedding_config_state(pending)
+    _clear_pending_embedding_config_state()
+    PrintStyle.standard(
+        "Cognee embedding config state applied after successful rebuild: "
+        f"{_format_embedding_config_state(pending)}"
+    )
 
 
 def _get_api_key(provider: str, api_keys: dict[str, str] | None = None) -> str:
@@ -349,15 +643,15 @@ def configure_cognee() -> None:
 
 
 async def _create_db_tables():
-    _patch_lancedb_migration_defaults()
+    embedding_rebuild_needed = _embedding_config_rebuild_needed()
     try:
-        from cognee.run_migrations import run_startup_migrations
+        from cognee.run_migrations import run_migrations
 
-        await run_startup_migrations()
+        await run_migrations()
     except BaseException as mig_err:
         # Must catch BaseException: Cognee's run_migrations() calls sys.exit(1)
         # on alembic failure, raising SystemExit which is BaseException, not Exception.
-        PrintStyle.error(f"Cognee run_startup_migrations failed ({type(mig_err).__name__}), trying create_db_and_tables: {mig_err}")
+        PrintStyle.error(f"Cognee relational migrations failed ({type(mig_err).__name__}), trying create_db_and_tables: {mig_err}")
         try:
             from cognee.infrastructure.databases.relational import create_db_and_tables
 
@@ -366,68 +660,116 @@ async def _create_db_tables():
             PrintStyle.error(f"Cognee DB table creation failed: {e}")
             raise RuntimeError(f"Cognee DB table creation failed: {e}") from e
 
+    if embedding_rebuild_needed:
+        PrintStyle.warning(
+            "Skipping Cognee startup vector migrations because embedding "
+            "rebuild is pending; the background rebuild will recreate vectors."
+        )
+    else:
+        await _run_lancedb_payload_schema_migrations()
+
     _sync_missing_columns()
     _rewrite_legacy_data_storage_locations()
     _quarantine_missing_data_files()
-    try:
-        await _optimize_fragmented_lancedb_tables()
-    except Exception as e:
-        PrintStyle.error(
-            "LanceDB optimization failed during startup; continuing Cognee init "
-            f"with degraded search risk: {e}"
+    if embedding_rebuild_needed:
+        PrintStyle.warning(
+            "Skipping startup LanceDB optimization because Cognee embedding "
+            "rebuild is pending; the rebuild will refresh vector tables."
         )
-    affected_datasets = await _detect_datasets_with_unready_graphs()
-    if affected_datasets:
-        await _reset_cognify_status_for_datasets(affected_datasets)
+    else:
+        try:
+            await _optimize_fragmented_lancedb_tables()
+        except Exception as e:
+            PrintStyle.error(
+                "LanceDB optimization failed during startup; continuing Cognee init "
+                f"with degraded search risk: {e}"
+            )
+    if embedding_rebuild_needed:
+        PrintStyle.warning(
+            "Skipping startup Cognee graph readiness scan because embedding "
+            "rebuild is pending; all affected datasets will be reset by the "
+            "embedding rebuild scheduler."
+        )
+    else:
+        affected_datasets = await _detect_datasets_with_unready_graphs()
+        if affected_datasets:
+            await _reset_cognify_status_for_datasets(affected_datasets)
     PrintStyle.standard("Cognee DB tables initialized")
 
 
-def _patch_lancedb_migration_defaults() -> None:
-    """Patch Cognee LanceDB migration defaults for old vector rows.
-
-    Cognee's generated LanceDB payload schema makes source_* fields required
-    even though the original Pydantic model defaults them to None. Existing
-    1.0.1-era rows do not contain those fields, so startup migration aborts
-    before rebuilding the table. Adding explicit None defaults lets Cognee's own
-    migration preserve rows instead of skipping them.
-    """
+async def _run_lancedb_payload_schema_migrations() -> list[dict[str, Any]]:
+    """Run Cognee's vector payload data migration as an explicit startup step."""
     try:
-        from cognee.infrastructure.databases.vector.lancedb.LanceDBAdapter import (
-            LanceDBAdapter,
-        )
+        from cognee.run_migrations import run_vector_migrations
 
-        if getattr(LanceDBAdapter, "_a0_memory_cognee_defaults_patch", False):
-            return
-
-        original = LanceDBAdapter._get_payload_defaults
-
-        def _patched_get_payload_defaults(self, payload_schema):
-            defaults = dict(original(self, payload_schema) or {})
-            try:
-                schema_model = self.get_data_point_schema(payload_schema)
-                fields = getattr(schema_model, "model_fields", {})
-            except Exception:
-                fields = {}
-
-            for key in (
-                "source_pipeline",
-                "source_task",
-                "source_node_set",
-                "source_user",
-                "source_content_hash",
-            ):
-                if key in fields and key not in defaults:
-                    defaults[key] = None
-
-            if "metadata" in fields and "metadata" not in defaults:
-                defaults["metadata"] = {}
-
-            return defaults
-
-        LanceDBAdapter._get_payload_defaults = _patched_get_payload_defaults
-        LanceDBAdapter._a0_memory_cognee_defaults_patch = True
+        summaries = await run_vector_migrations()
     except Exception as e:
-        PrintStyle.warning(f"Could not patch LanceDB migration defaults: {e}")
+        PrintStyle.error(f"Cognee LanceDB payload schema migration failed: {e}")
+        raise
+
+    summaries = list(summaries or [])
+    failed = []
+    checked_count = 0
+    migrated_count = 0
+    for summary in summaries:
+        result = summary.get("result") if isinstance(summary, dict) else None
+        if result == "failed":
+            failed.append(summary)
+            continue
+        if isinstance(result, dict):
+            checked_count += len(result.get("checked_collections") or [])
+            migrated_count += len(result.get("migrated_collections") or [])
+
+    if failed:
+        queued = await _queue_rebuild_after_lancedb_payload_migration_failure(failed)
+        if queued is None:
+            details = json.dumps(failed, ensure_ascii=False, default=str)
+            raise RuntimeError(
+                "Cognee LanceDB payload schema migration failed and datasets "
+                f"were not queued for rebuild: {details}"
+            )
+        if queued:
+            PrintStyle.warning(
+                "Cognee LanceDB payload schema migration failed; purged stale "
+                f"vector tables and queued rebuild for dataset(s): {queued}"
+            )
+        else:
+            PrintStyle.warning(
+                "Cognee LanceDB payload schema migration failed, but no datasets "
+                "exist to rebuild."
+            )
+
+    if summaries:
+        PrintStyle.standard(
+            "Cognee LanceDB payload schema migration completed "
+            f"(summaries={len(summaries)}, checked={checked_count}, migrated={migrated_count})"
+        )
+    return summaries
+
+
+async def _queue_rebuild_after_lancedb_payload_migration_failure(
+    failed_summaries: list[dict[str, Any]],
+) -> list[str] | None:
+    """Recover old incompatible LanceDB payload tables by rebuilding plugin data."""
+    queued = await reset_cognify_status_for_all_datasets()
+    if queued is None:
+        return None
+    if not queued:
+        PrintStyle.warning(
+            "Cognee LanceDB payload schema migration failed, but no datasets "
+            "exist to rebuild."
+        )
+        return []
+
+    try:
+        await purge_lancedb_vector_tables_for_dataset_names(queued)
+    except Exception as e:
+        detail = json.dumps(failed_summaries, ensure_ascii=False, default=str)
+        raise RuntimeError(
+            "Cognee LanceDB payload schema migration failed and stale vector "
+            f"tables could not be purged for rebuild: {e}; failures={detail}"
+        ) from e
+    return queued
 
 
 def _patch_lancedb_remote_table_replay_refs() -> None:
@@ -570,6 +912,91 @@ async def _optimize_fragmented_lancedb_tables(
     return optimized
 
 
+def _lancedb_dataset_dir_name(dataset_id: Any) -> str | None:
+    value = str(dataset_id or "").strip()
+    if not value:
+        return None
+
+    try:
+        normalized = str(uuid.UUID(value))
+    except ValueError:
+        try:
+            normalized = str(uuid.UUID(hex=value))
+        except ValueError:
+            normalized = value
+    return f"{normalized}.lance.db"
+
+
+async def purge_lancedb_vector_tables_for_dataset_names(
+    dataset_names: list[str],
+) -> list[str]:
+    """Delete LanceDB vector stores for named datasets before embedding rebuild.
+
+    This only removes per-dataset ``*.lance.db`` vector directories. Relational
+    data, graph files, and Cognee source files remain intact; cognify recreates
+    vectors from the existing data.
+    """
+    clean_names = {name for name in dataset_names if name}
+    if not clean_names:
+        return []
+
+    system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY", "")
+    if not system_root:
+        raise RuntimeError("SYSTEM_ROOT_DIRECTORY is not configured")
+
+    databases_root = Path(system_root) / "databases"
+    if not databases_root.exists():
+        raise RuntimeError(f"Cognee databases directory does not exist: {databases_root}")
+
+    try:
+        import cognee
+    except Exception as e:
+        PrintStyle.warning(f"Cannot import cognee to purge LanceDB vectors: {e}")
+        raise RuntimeError(f"Cannot import cognee to purge LanceDB vectors: {e}") from e
+
+    try:
+        all_datasets = await cognee.datasets.list_datasets()
+    except Exception as e:
+        PrintStyle.warning(f"Could not list Cognee datasets to purge LanceDB vectors: {e}")
+        raise RuntimeError(
+            f"Could not list Cognee datasets to purge LanceDB vectors: {e}"
+        ) from e
+
+    target_dirs: dict[str, str] = {}
+    for ds in all_datasets:
+        name = getattr(ds, "name", None)
+        if name not in clean_names:
+            continue
+        dir_name = _lancedb_dataset_dir_name(getattr(ds, "id", None))
+        if dir_name:
+            target_dirs[str(name)] = dir_name
+
+    missing_names = clean_names.difference(target_dirs)
+    if missing_names:
+        raise RuntimeError(
+            "Could not resolve Cognee dataset id(s) to purge LanceDB vectors: "
+            f"{sorted(missing_names)}"
+        )
+
+    purged: list[str] = []
+    for dataset_name, dir_name in target_dirs.items():
+        removed_paths: list[str] = []
+        for vector_dir in databases_root.rglob(dir_name):
+            if not vector_dir.is_dir() or not vector_dir.name.endswith(".lance.db"):
+                continue
+            shutil.rmtree(vector_dir)
+            removed_paths.append(str(vector_dir))
+
+        if removed_paths:
+            purged.append(dataset_name)
+            PrintStyle.warning(
+                "Purged stale LanceDB vector store before embedding rebuild "
+                f"for dataset {dataset_name}: {removed_paths}"
+            )
+
+    return purged
+
+
 def _rewrite_legacy_data_storage_locations() -> int:
     """Rewrite old absolute Cognee file:// data paths to the current data root.
 
@@ -664,6 +1091,11 @@ def _rewrite_data_storage_uri(value: Any, data_root: str) -> str | None:
     data_root_abs = os.path.abspath(data_root)
     if not candidate.startswith(data_root_abs + os.sep) and candidate != data_root_abs:
         return None
+
+    current_path = os.path.abspath(path)
+    if current_path == candidate:
+        return None
+
     if not os.path.exists(candidate):
         return None
 
@@ -799,6 +1231,7 @@ async def _detect_datasets_with_unready_graphs() -> set[str]:
             cognee,
             skip_empty_data=True,
             repair_unreadable=True,
+            include_graph_data=False,
         )
         for graph in dataset_graphs:
             dataset_id = str(getattr(graph, "dataset_id", "") or "")
@@ -816,9 +1249,11 @@ async def _detect_datasets_with_unready_graphs() -> set[str]:
             graph_error = getattr(graph, "error", None)
             graph_empty = getattr(graph, "graph_empty", None)
             if graph_error:
+                if dataset_id:
+                    unready_dataset_ids.add(dataset_id)
                 PrintStyle.warning(
                     f"Could not verify Cognee dataset '{dataset_name}' graph during "
-                    f"startup; leaving pipeline status unchanged: {graph_error}"
+                    f"startup; will reset cognify_pipeline: {graph_error}"
                 )
                 continue
             if graph_empty is False and not graph_error:
@@ -840,6 +1275,33 @@ async def _detect_datasets_with_unready_graphs() -> set[str]:
 
 async def _log_startup_readiness(migration_completed: bool, worker_status: dict) -> None:
     """Log a single operator-readable Cognee readiness summary."""
+    dirty = sorted(str(name) for name in (worker_status.get("dirty_datasets") or []))
+    readiness = worker_status.get("dataset_readiness") or {}
+    blocked_states = []
+    readable_rebuild_states = []
+    if isinstance(readiness, dict):
+        for dataset_name, state in readiness.items():
+            if not isinstance(state, dict):
+                continue
+            state_name = str(state.get("state") or "")
+            if state_name and state_name != "ready" and not state.get("readable"):
+                blocked_states.append(f"{dataset_name}:{state_name}")
+            elif state_name and state_name != "ready":
+                readable_rebuild_states.append(f"{dataset_name}:{state_name}")
+
+    running = bool(worker_status.get("running"))
+    migration_status = "complete" if migration_completed else "incomplete"
+
+    if _embedding_config_rebuild_needed():
+        PrintStyle.warning(
+            "Cognee startup readiness: BLOCKED; embedding config rebuild is pending. "
+            "Dataset graph status was not read during startup to avoid opening Cognee "
+            "graph/vector subprocesses before the background rebuild. "
+            f"migration={migration_status}; running={running}; "
+            f"dirty={dirty}; blocked_states={blocked_states}"
+        )
+        return
+
     try:
         import cognee
 
@@ -852,6 +1314,7 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
             cognee,
             skip_empty_data=True,
             repair_unreadable=False,
+            include_graph_data=False,
         )
     except Exception as e:
         PrintStyle.warning(
@@ -879,29 +1342,44 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
         else:
             unknown.append(dataset_name)
 
-    dirty = sorted(str(name) for name in (worker_status.get("dirty_datasets") or []))
-    readiness = worker_status.get("dataset_readiness") or {}
-    blocked_states = []
-    if isinstance(readiness, dict):
-        for dataset_name, state in readiness.items():
-            if not isinstance(state, dict):
-                continue
-            state_name = str(state.get("state") or "")
-            if state_name and state_name != "ready":
-                blocked_states.append(f"{dataset_name}:{state_name}")
+    if ready:
+        try:
+            from .cognee_background import CogneeBackgroundWorker
 
-    running = bool(worker_status.get("running"))
+            CogneeBackgroundWorker.get_instance().mark_datasets_readable(
+                ready,
+                "Cognee startup graph readiness verified",
+            )
+            if isinstance(readiness, dict):
+                for dataset_name in ready:
+                    state = readiness.setdefault(dataset_name, {})
+                    if isinstance(state, dict):
+                        state["readable"] = True
+                        state.setdefault("state", "ready")
+        except Exception as e:
+            PrintStyle.warning(f"Could not record Cognee readable datasets: {e}")
+
+    dirty_blocking = []
+    if isinstance(readiness, dict):
+        for dataset_name in dirty:
+            state = readiness.get(dataset_name, {})
+            if not isinstance(state, dict) or not state.get("readable"):
+                dirty_blocking.append(dataset_name)
+    else:
+        dirty_blocking = dirty
+
     graph_blocked = bool(empty or errors or unknown)
-    worker_blocked = bool(running or dirty or blocked_states)
+    worker_blocked = bool(dirty_blocking or blocked_states)
     graph_total = len(ready) + len(empty) + len(errors) + len(unknown)
-    migration_status = "complete" if migration_completed else "incomplete"
 
     if graph_blocked or worker_blocked:
         PrintStyle.warning(
             "Cognee startup readiness: BLOCKED; recall may be unavailable. "
             f"graphs_ready={len(ready)}/{graph_total}; "
             f"migration={migration_status}; running={running}; "
-            f"dirty={dirty}; blocked_states={blocked_states}; "
+            f"dirty={dirty}; dirty_blocking={dirty_blocking}; "
+            f"blocked_states={blocked_states}; "
+            f"readable_rebuild_states={readable_rebuild_states}; "
             f"empty_graphs={empty}; graph_errors={_short_list(errors)}; "
             f"unknown_graphs={unknown}"
         )
@@ -936,10 +1414,10 @@ async def _reset_cognify_status_for_datasets(
     dataset_ids: set[str],
     *,
     reset_all: bool = False,
-) -> None:
+) -> list[str] | None:
     """Reset cognify_pipeline status and mark only affected datasets dirty."""
     if not dataset_ids:
-        return
+        return []
     try:
         import cognee
     except Exception as e:
@@ -947,7 +1425,7 @@ async def _reset_cognify_status_for_datasets(
             f"Cannot import cognee dataset helpers: {e}. "
             f"Graph will NOT auto-rebuild -- re-add data or call cognify manually."
         )
-        return
+        return None
 
     try:
         all_datasets = await cognee.datasets.list_datasets()
@@ -956,7 +1434,7 @@ async def _reset_cognify_status_for_datasets(
             f"Could not list datasets to reset cognify status: {e}. "
             f"Graph will NOT auto-rebuild -- re-add data or call cognify manually."
         )
-        return
+        return None
 
     requested_ids = {str(dataset_id) for dataset_id in dataset_ids}
     dataset_names: list[str] = []
@@ -973,7 +1451,7 @@ async def _reset_cognify_status_for_datasets(
         PrintStyle.warning(
             f"No Cognee datasets matched reset request: {sorted(requested_ids)}"
         )
-        return
+        return []
 
     reset_count = await _delete_pipeline_runs_for_dataset_ids(dataset_id_values)
 
@@ -983,21 +1461,22 @@ async def _reset_cognify_status_for_datasets(
             f"Graph will rebuild on next cognify()."
         )
 
-    if reset_count or reset_all:
-        try:
-            from .cognee_background import CogneeBackgroundWorker
+    try:
+        from .cognee_background import CogneeBackgroundWorker
 
-            worker = CogneeBackgroundWorker.get_instance()
-            for name in dataset_names:
-                worker.mark_dirty(name)
-            if dataset_names:
-                PrintStyle.standard(
-                    f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild: {dataset_names}"
-                )
-        except Exception as e:
-            PrintStyle.warning(
-                f"Could not mark datasets dirty (graph will rebuild on next insert instead): {e}"
+        worker = CogneeBackgroundWorker.get_instance()
+        for name in dataset_names:
+            worker.mark_dirty(name, preserve_readable=False)
+        if dataset_names:
+            PrintStyle.standard(
+                f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild: {dataset_names}"
             )
+        return dataset_names
+    except Exception as e:
+        PrintStyle.warning(
+            f"Could not mark datasets dirty (graph will rebuild on next insert instead): {e}"
+        )
+        return None
 
 
 async def reset_cognify_status_for_dataset_names(dataset_names: list[str]) -> list[str]:
@@ -1034,9 +1513,50 @@ async def reset_cognify_status_for_dataset_names(dataset_names: list[str]) -> li
     return reset_names
 
 
-async def reset_cognify_status_for_all_datasets() -> None:
+async def reset_cognify_status_for_all_datasets() -> list[str] | None:
     """Reset cognify_pipeline status for every dataset and mark them dirty."""
-    await _reset_cognify_status_for_datasets({"manual_reindex"}, reset_all=True)
+    return await _reset_cognify_status_for_datasets({"manual_reindex"}, reset_all=True)
+
+
+async def mark_all_datasets_dirty_for_rebuild(reason: str) -> list[str] | None:
+    """Resume a pending rebuild without deleting Cognee pipeline progress again."""
+    try:
+        import cognee
+    except Exception as e:
+        PrintStyle.error(f"Cannot import cognee dataset helpers: {e}")
+        return None
+
+    try:
+        all_datasets = await cognee.datasets.list_datasets()
+    except Exception as e:
+        PrintStyle.error(f"Could not list datasets to resume Cognee rebuild: {e}")
+        return None
+
+    dataset_names = [
+        ds.name
+        for ds in all_datasets
+        if getattr(ds, "name", None)
+    ]
+    if not dataset_names:
+        PrintStyle.warning("No Cognee datasets found for pending rebuild resume")
+        return []
+
+    try:
+        from .cognee_background import CogneeBackgroundWorker
+
+        worker = CogneeBackgroundWorker.get_instance()
+        for name in dataset_names:
+            worker.mark_dirty(name, reset_retry=False, preserve_readable=False)
+        PrintStyle.standard(
+            f"Marked {len(dataset_names)} dataset(s) dirty for background rebuild resume "
+            f"({reason}): {dataset_names}"
+        )
+        return dataset_names
+    except Exception as e:
+        PrintStyle.warning(
+            f"Could not mark datasets dirty for pending rebuild resume: {e}"
+        )
+        return None
 
 
 async def _delete_pipeline_runs_for_dataset_ids(dataset_ids: list) -> int:
@@ -1261,6 +1781,7 @@ def run_memory_cognee_init_a0_extension() -> None:
     import asyncio
 
     try:
+        _disable_builtin_memory_plugin()
         configure_cognee()
         asyncio.run(init_cognee())
         from . import faiss_migration
@@ -1268,6 +1789,7 @@ def run_memory_cognee_init_a0_extension() -> None:
         migrated = asyncio.run(faiss_migration.run_migration())
         if not migrated:
             PrintStyle.warning("FAISS -> Cognee migration did not complete; will retry on next startup")
+        asyncio.run(_ensure_embedding_config_state())
         from .cognee_background import CogneeBackgroundWorker
 
         worker = CogneeBackgroundWorker.get_instance()
@@ -1280,10 +1802,42 @@ def run_memory_cognee_init_a0_extension() -> None:
                 f"background rebuild pending for dataset(s): {dirty_datasets}"
             )
 
-        worker.start()
     except BaseException as e:
         # BaseException: asyncio.run() re-raises SystemExit from run_migrations
         PrintStyle.error(f"Cognee eager init failed ({type(e).__name__}): {e}")
+
+
+def run_memory_cognee_start_worker_extension() -> None:
+    """Start the background rebuild worker after Agent Zero startup hooks finish."""
+    if _cognee_module is None or not _init_done:
+        PrintStyle.warning(
+            "Cognee background worker not started because Cognee initialization "
+            "did not complete."
+        )
+        return
+    try:
+        from .cognee_background import CogneeBackgroundWorker
+
+        CogneeBackgroundWorker.get_instance().start()
+    except BaseException as e:
+        PrintStyle.error(f"Cognee background worker start failed ({type(e).__name__}): {e}")
+
+
+def _disable_builtin_memory_plugin() -> None:
+    """Ensure the FAISS-backed builtin memory plugin cannot run beside Cognee."""
+    try:
+        from helpers import plugins
+
+        enabled = plugins.get_enabled_plugins(None)
+        if "_memory" not in enabled:
+            return
+
+        plugins.toggle_plugin("_memory", False)
+        PrintStyle.warning(
+            "Disabled builtin _memory plugin because memory_cognee replaces it."
+        )
+    except Exception as e:
+        PrintStyle.warning(f"Could not disable builtin _memory plugin: {e}")
 
 
 def get_cognee():

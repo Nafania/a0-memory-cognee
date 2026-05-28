@@ -155,6 +155,30 @@ class CogneeInitStartupTest(unittest.TestCase):
                 cognee_init._rewrite_data_storage_uri(missing_uri, str(data_root))
             )
 
+    def test_does_not_stat_current_data_storage_location(self):
+        cognee_init = _load_cognee_init_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_root = Path(tmp_dir) / "data_storage"
+            data_path = data_root / "owner-id" / "text_abc.txt"
+            uri = f"file://{data_path}"
+            original_exists = cognee_init.os.path.exists
+            exists_calls = []
+
+            def exists(path):
+                exists_calls.append(path)
+                return original_exists(path)
+
+            cognee_init.os.path.exists = exists
+            try:
+                self.assertIsNone(
+                    cognee_init._rewrite_data_storage_uri(uri, str(data_root))
+                )
+            finally:
+                cognee_init.os.path.exists = original_exists
+
+            self.assertEqual(exists_calls, [])
+
     def test_quarantines_data_rows_with_missing_source_files_without_deleting_data(self):
         cognee_init = _load_cognee_init_module()
 
@@ -335,10 +359,10 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         run_migrations_module = types.ModuleType("cognee.run_migrations")
 
-        async def run_startup_migrations():
+        async def run_migrations():
             raise SystemExit(1)
 
-        run_migrations_module.run_startup_migrations = run_startup_migrations
+        run_migrations_module.run_migrations = run_migrations
 
         relational_module = types.ModuleType("cognee.infrastructure.databases.relational")
 
@@ -371,10 +395,10 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         run_migrations_module = types.ModuleType("cognee.run_migrations")
 
-        async def run_startup_migrations():
+        async def run_migrations():
             return None
 
-        run_migrations_module.run_startup_migrations = run_startup_migrations
+        run_migrations_module.run_migrations = run_migrations
         old_run_migrations = sys.modules.get("cognee.run_migrations")
         sys.modules["cognee.run_migrations"] = run_migrations_module
 
@@ -387,13 +411,16 @@ class CogneeInitStartupTest(unittest.TestCase):
             reached_detection["value"] = True
             return set()
 
-        original_lancedb = cognee_init._patch_lancedb_migration_defaults
+        original_lancedb = cognee_init._run_lancedb_payload_schema_migrations
         original_sync = cognee_init._sync_missing_columns
         original_rewrite = cognee_init._rewrite_legacy_data_storage_locations
         original_quarantine = cognee_init._quarantine_missing_data_files
         original_optimize = cognee_init._optimize_fragmented_lancedb_tables
         original_detect = cognee_init._detect_datasets_with_unready_graphs
-        cognee_init._patch_lancedb_migration_defaults = lambda: None
+        async def no_lancedb_migration():
+            return []
+
+        cognee_init._run_lancedb_payload_schema_migrations = no_lancedb_migration
         cognee_init._sync_missing_columns = lambda: None
         cognee_init._rewrite_legacy_data_storage_locations = lambda: None
         cognee_init._quarantine_missing_data_files = lambda: None
@@ -402,7 +429,7 @@ class CogneeInitStartupTest(unittest.TestCase):
         try:
             asyncio.run(cognee_init._create_db_tables())
         finally:
-            cognee_init._patch_lancedb_migration_defaults = original_lancedb
+            cognee_init._run_lancedb_payload_schema_migrations = original_lancedb
             cognee_init._sync_missing_columns = original_sync
             cognee_init._rewrite_legacy_data_storage_locations = original_rewrite
             cognee_init._quarantine_missing_data_files = original_quarantine
@@ -414,6 +441,61 @@ class CogneeInitStartupTest(unittest.TestCase):
                 sys.modules["cognee.run_migrations"] = old_run_migrations
 
         self.assertTrue(reached_detection["value"])
+
+    def test_create_db_tables_skips_vector_migrations_when_embedding_rebuild_pending(self):
+        cognee_init = _load_cognee_init_module()
+        calls = []
+
+        run_migrations_module = types.ModuleType("cognee.run_migrations")
+
+        async def run_migrations():
+            calls.append("relational")
+
+        run_migrations_module.run_migrations = run_migrations
+        old_run_migrations = sys.modules.get("cognee.run_migrations")
+        sys.modules["cognee.run_migrations"] = run_migrations_module
+
+        original_rebuild_needed = cognee_init._embedding_config_rebuild_needed
+        original_lancedb = cognee_init._run_lancedb_payload_schema_migrations
+        original_sync = cognee_init._sync_missing_columns
+        original_rewrite = cognee_init._rewrite_legacy_data_storage_locations
+        original_quarantine = cognee_init._quarantine_missing_data_files
+        original_optimize = cognee_init._optimize_fragmented_lancedb_tables
+        original_detect = cognee_init._detect_datasets_with_unready_graphs
+        cognee_init._embedding_config_rebuild_needed = lambda current=None: True
+        async def no_lancedb_migration():
+            calls.append("vector")
+
+        cognee_init._run_lancedb_payload_schema_migrations = no_lancedb_migration
+        cognee_init._sync_missing_columns = lambda: None
+        cognee_init._rewrite_legacy_data_storage_locations = lambda: None
+        cognee_init._quarantine_missing_data_files = lambda: None
+
+        async def optimize():
+            calls.append("optimize")
+
+        async def detect():
+            calls.append("detect")
+            return set()
+
+        cognee_init._optimize_fragmented_lancedb_tables = optimize
+        cognee_init._detect_datasets_with_unready_graphs = detect
+        try:
+            asyncio.run(cognee_init._create_db_tables())
+        finally:
+            if old_run_migrations is None:
+                sys.modules.pop("cognee.run_migrations", None)
+            else:
+                sys.modules["cognee.run_migrations"] = old_run_migrations
+            cognee_init._embedding_config_rebuild_needed = original_rebuild_needed
+            cognee_init._run_lancedb_payload_schema_migrations = original_lancedb
+            cognee_init._sync_missing_columns = original_sync
+            cognee_init._rewrite_legacy_data_storage_locations = original_rewrite
+            cognee_init._quarantine_missing_data_files = original_quarantine
+            cognee_init._optimize_fragmented_lancedb_tables = original_optimize
+            cognee_init._detect_datasets_with_unready_graphs = original_detect
+
+        self.assertEqual(calls, ["relational"])
 
     def test_detects_dataset_with_data_but_empty_graph(self):
         cognee_init = _load_cognee_init_module()
@@ -511,7 +593,7 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         self.assertEqual(unready, set())
 
-    def test_unready_detection_ignores_graph_read_error(self):
+    def test_unready_detection_treats_graph_read_error_as_unready(self):
         cognee_init = _load_cognee_init_module()
 
         dataset_id = "00afc710-2c0c-5d61-957e-c452672842ae"
@@ -553,7 +635,7 @@ class CogneeInitStartupTest(unittest.TestCase):
                     "usr.plugins.memory_cognee.helpers.cognee_graph"
                 ] = old_graph
 
-        self.assertEqual(unready, set())
+        self.assertEqual(unready, {dataset_id})
 
     def test_startup_readiness_logs_degraded_when_faiss_pending(self):
         cognee_init = _load_cognee_init_module()
@@ -631,6 +713,74 @@ class CogneeInitStartupTest(unittest.TestCase):
             )
         )
 
+    def test_startup_readiness_does_not_open_graph_when_embedding_rebuild_pending(self):
+        cognee_init = _load_cognee_init_module()
+        messages: list[tuple[str, str]] = []
+
+        class PrintStyle:
+            @staticmethod
+            def warning(*args, **kwargs):
+                messages.append(("warning", " ".join(str(arg) for arg in args)))
+
+            @staticmethod
+            def error(*args, **kwargs):
+                messages.append(("error", " ".join(str(arg) for arg in args)))
+
+            @staticmethod
+            def standard(*args, **kwargs):
+                messages.append(("standard", " ".join(str(arg) for arg in args)))
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_graph_module = types.ModuleType(
+            "usr.plugins.memory_cognee.helpers.cognee_graph"
+        )
+
+        async def read_dataset_graphs(cognee, dataset_names=None, **kwargs):
+            raise AssertionError("graph should not be opened during pending rebuild")
+
+        fake_graph_module.read_dataset_graphs = read_dataset_graphs
+        old_print_style = cognee_init.PrintStyle
+        old_rebuild_needed = cognee_init._embedding_config_rebuild_needed
+        old_cognee = sys.modules.get("cognee")
+        old_graph = sys.modules.get("usr.plugins.memory_cognee.helpers.cognee_graph")
+        sys.modules["cognee"] = fake_cognee
+        sys.modules["usr.plugins.memory_cognee.helpers.cognee_graph"] = fake_graph_module
+        cognee_init.PrintStyle = PrintStyle
+        cognee_init._embedding_config_rebuild_needed = lambda current=None: True
+        try:
+            asyncio.run(
+                cognee_init._log_startup_readiness(
+                    False,
+                    {
+                        "dirty_datasets": ["default"],
+                        "dataset_readiness": {"default": {"state": "dirty", "readable": False}},
+                        "running": False,
+                    },
+                )
+            )
+        finally:
+            cognee_init.PrintStyle = old_print_style
+            cognee_init._embedding_config_rebuild_needed = old_rebuild_needed
+            if old_cognee is None:
+                sys.modules.pop("cognee", None)
+            else:
+                sys.modules["cognee"] = old_cognee
+            if old_graph is None:
+                sys.modules.pop("usr.plugins.memory_cognee.helpers.cognee_graph", None)
+            else:
+                sys.modules[
+                    "usr.plugins.memory_cognee.helpers.cognee_graph"
+                ] = old_graph
+
+        self.assertTrue(
+            any(
+                level == "warning"
+                and "embedding config rebuild is pending" in message
+                and "default:dirty" in message
+                for level, message in messages
+            )
+        )
+
     def test_startup_readiness_logs_blocked_dataset_status(self):
         cognee_init = _load_cognee_init_module()
         messages: list[tuple[str, str]] = []
@@ -676,7 +826,7 @@ class CogneeInitStartupTest(unittest.TestCase):
                     True,
                     {
                         "dirty_datasets": ["default"],
-                        "dataset_readiness": {"default": {"state": "dirty"}},
+                        "dataset_readiness": {"default": {"state": "dirty", "readable": False}},
                         "running": False,
                     },
                 )
@@ -782,44 +932,42 @@ class CogneeInitStartupTest(unittest.TestCase):
 
         self.assertEqual(deleted_ids, [affected_id])
 
-    def test_patches_lancedb_migration_defaults_for_source_fields(self):
+    def test_lancedb_payload_schema_migration_failure_queues_rebuild(self):
         cognee_init = _load_cognee_init_module()
 
-        module_name = "cognee.infrastructure.databases.vector.lancedb.LanceDBAdapter"
-        fake_module = types.ModuleType(module_name)
+        run_migrations_module = types.ModuleType("cognee.run_migrations")
 
-        class PayloadSchema:
-            model_fields = {
-                "id": object(),
-                "source_pipeline": object(),
-                "source_task": object(),
-                "source_node_set": object(),
-                "source_user": object(),
-                "source_content_hash": object(),
-                "metadata": object(),
-                "text": object(),
-            }
+        async def run_vector_migrations():
+            return [{"dataset_id": "default", "provider": "lancedb", "result": "failed"}]
 
-        class LanceDBAdapter:
-            def _get_payload_defaults(self, payload_schema):
-                return {"id": "", "text": ""}
+        run_migrations_module.run_vector_migrations = run_vector_migrations
+        old_run_migrations = sys.modules.get("cognee.run_migrations")
+        sys.modules["cognee.run_migrations"] = run_migrations_module
+        calls = []
 
-            def get_data_point_schema(self, payload_schema):
-                return PayloadSchema
+        async def purge(dataset_names):
+            calls.append(("purge", list(dataset_names)))
+            return list(dataset_names)
 
-        fake_module.LanceDBAdapter = LanceDBAdapter
-        sys.modules[module_name] = fake_module
+        async def reset_all():
+            calls.append(("reset_all", None))
+            return ["default"]
 
-        cognee_init._patch_lancedb_migration_defaults()
+        cognee_init.purge_lancedb_vector_tables_for_dataset_names = purge
+        cognee_init.reset_cognify_status_for_all_datasets = reset_all
+        try:
+            summaries = asyncio.run(cognee_init._run_lancedb_payload_schema_migrations())
+        finally:
+            if old_run_migrations is None:
+                sys.modules.pop("cognee.run_migrations", None)
+            else:
+                sys.modules["cognee.run_migrations"] = old_run_migrations
 
-        defaults = LanceDBAdapter()._get_payload_defaults(object())
-        self.assertEqual(defaults["source_pipeline"], None)
-        self.assertEqual(defaults["source_task"], None)
-        self.assertEqual(defaults["source_node_set"], None)
-        self.assertEqual(defaults["source_user"], None)
-        self.assertEqual(defaults["source_content_hash"], None)
-        self.assertEqual(defaults["metadata"], {})
-        self.assertEqual(defaults["text"], "")
+        self.assertEqual(
+            summaries,
+            [{"dataset_id": "default", "provider": "lancedb", "result": "failed"}],
+        )
+        self.assertEqual(calls, [("reset_all", None), ("purge", ["default"])])
 
     def test_patches_remote_lancedb_table_replay_step_to_avoid_self_cycle(self):
         cognee_init = _load_cognee_init_module()
@@ -968,6 +1116,102 @@ class CogneeInitStartupTest(unittest.TestCase):
         self.assertEqual(calls[1][0:3], ("open_table", calls[0][1], "Entity_name"))
         self.assertEqual(calls[2], ("optimize", "Entity_name", timedelta(seconds=0)))
 
+    def test_purges_lancedb_vector_store_for_named_dataset_only(self):
+        cognee_init = _load_cognee_init_module()
+
+        target_id = "864d19636b2d58dba6237b638d3523b9"
+        target_uuid = "864d1963-6b2d-58db-a623-7b638d3523b9"
+        other_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+        fake_cognee = types.ModuleType("cognee")
+
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [
+                    types.SimpleNamespace(id=target_id, name="projects_personal_solutions"),
+                    types.SimpleNamespace(id=other_uuid, name="default"),
+                ]
+
+        fake_cognee.datasets = FakeDatasets()
+        old_cognee = sys.modules.get("cognee")
+        sys.modules["cognee"] = fake_cognee
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_root = Path(tmp_dir) / "cognee_system"
+            owner_dir = system_root / "databases" / "owner-id"
+            target_vector_dir = owner_dir / f"{target_uuid}.lance.db"
+            other_vector_dir = owner_dir / f"{other_uuid}.lance.db"
+            graph_file = system_root / "databases" / "cognee_graph_ladybug"
+            target_vector_dir.mkdir(parents=True)
+            other_vector_dir.mkdir(parents=True)
+            (target_vector_dir / "EntityType_name.lance").mkdir()
+            (target_vector_dir / "EntityType_name.lance" / "segment.lance").write_text("x")
+            (other_vector_dir / "DocumentChunk_text.lance").mkdir()
+            (other_vector_dir / "DocumentChunk_text.lance" / "segment.lance").write_text("x")
+            _write_graph_file(graph_file, 999, magic=b"LBUG")
+
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            try:
+                purged = asyncio.run(
+                    cognee_init.purge_lancedb_vector_tables_for_dataset_names(
+                        ["projects_personal_solutions"]
+                    )
+                )
+                target_exists_after = target_vector_dir.exists()
+                other_exists_after = other_vector_dir.exists()
+                graph_exists_after = graph_file.exists()
+            finally:
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+                if old_cognee is None:
+                    sys.modules.pop("cognee", None)
+                else:
+                    sys.modules["cognee"] = old_cognee
+
+        self.assertEqual(purged, ["projects_personal_solutions"])
+        self.assertFalse(target_exists_after)
+        self.assertTrue(other_exists_after)
+        self.assertTrue(graph_exists_after)
+
+    def test_purge_lancedb_vector_store_raises_when_datasets_cannot_be_listed(self):
+        cognee_init = _load_cognee_init_module()
+
+        fake_cognee = types.ModuleType("cognee")
+
+        class FakeDatasets:
+            async def list_datasets(self):
+                raise RuntimeError("dataset registry down")
+
+        fake_cognee.datasets = FakeDatasets()
+        old_cognee = sys.modules.get("cognee")
+        sys.modules["cognee"] = fake_cognee
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_root = Path(tmp_dir) / "cognee_system"
+            (system_root / "databases").mkdir(parents=True)
+
+            old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "dataset registry down"):
+                    asyncio.run(
+                        cognee_init.purge_lancedb_vector_tables_for_dataset_names(
+                            ["default"]
+                        )
+                    )
+            finally:
+                if old_system_root is None:
+                    os.environ.pop("SYSTEM_ROOT_DIRECTORY", None)
+                else:
+                    os.environ["SYSTEM_ROOT_DIRECTORY"] = old_system_root
+                if old_cognee is None:
+                    sys.modules.pop("cognee", None)
+                else:
+                    sys.modules["cognee"] = old_cognee
+
     def test_startup_does_not_purge_ladybug_graph_files(self):
         cognee_init = _load_cognee_init_module()
 
@@ -978,16 +1222,16 @@ class CogneeInitStartupTest(unittest.TestCase):
 
             run_migrations_module = types.ModuleType("cognee.run_migrations")
 
-            async def run_startup_migrations():
+            async def run_migrations():
                 return None
 
-            run_migrations_module.run_startup_migrations = run_startup_migrations
+            run_migrations_module.run_migrations = run_migrations
             old_run_migrations = sys.modules.get("cognee.run_migrations")
             sys.modules["cognee.run_migrations"] = run_migrations_module
 
             old_system_root = os.environ.get("SYSTEM_ROOT_DIRECTORY")
             os.environ["SYSTEM_ROOT_DIRECTORY"] = str(system_root)
-            original_lancedb = cognee_init._patch_lancedb_migration_defaults
+            original_lancedb = cognee_init._run_lancedb_payload_schema_migrations
             original_sync = cognee_init._sync_missing_columns
             original_rewrite = cognee_init._rewrite_legacy_data_storage_locations
             original_quarantine = cognee_init._quarantine_missing_data_files
@@ -996,7 +1240,10 @@ class CogneeInitStartupTest(unittest.TestCase):
             async def no_datasets():
                 return set()
 
-            cognee_init._patch_lancedb_migration_defaults = lambda: None
+            async def no_lancedb_migration():
+                return []
+
+            cognee_init._run_lancedb_payload_schema_migrations = no_lancedb_migration
             cognee_init._sync_missing_columns = lambda: None
             cognee_init._rewrite_legacy_data_storage_locations = lambda: None
             cognee_init._quarantine_missing_data_files = lambda: None
@@ -1004,7 +1251,7 @@ class CogneeInitStartupTest(unittest.TestCase):
             try:
                 asyncio.run(cognee_init._create_db_tables())
             finally:
-                cognee_init._patch_lancedb_migration_defaults = original_lancedb
+                cognee_init._run_lancedb_payload_schema_migrations = original_lancedb
                 cognee_init._sync_missing_columns = original_sync
                 cognee_init._rewrite_legacy_data_storage_locations = original_rewrite
                 cognee_init._quarantine_missing_data_files = original_quarantine

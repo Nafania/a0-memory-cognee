@@ -23,6 +23,17 @@ class SearchUnavailable(RuntimeError):
     pass
 
 
+def touch_memory_activity() -> None:
+    try:
+        from .cognee_background import CogneeBackgroundWorker
+
+        mark_activity = getattr(CogneeBackgroundWorker.get_instance(), "mark_activity", None)
+        if callable(mark_activity):
+            mark_activity()
+    except Exception:
+        return
+
+
 def _get_cognee():
     from .cognee_init import get_cognee
     return get_cognee()
@@ -43,7 +54,18 @@ def parse_node_set_area(raw_node_set) -> str:
         except (json.JSONDecodeError, ValueError):
             return ns.strip().lower()
     if isinstance(ns, list) and ns:
-        return str(ns[0]).strip().lower()
+        first = ns[0]
+        if isinstance(first, dict):
+            for key in ("name", "label", "value"):
+                if first.get(key):
+                    return str(first[key]).strip().lower()
+        if hasattr(first, "name") and getattr(first, "name"):
+            return str(getattr(first, "name")).strip().lower()
+        return str(first).strip().lower()
+    if isinstance(ns, dict):
+        for key in ("name", "label", "value"):
+            if ns.get(key):
+                return str(ns[key]).strip().lower()
     return str(ns).strip().lower()
 
 
@@ -256,10 +278,13 @@ class Memory:
         raise_unavailable: bool = False,
     ) -> list[Document]:
         node_names = _parse_filter_to_node_names(filter)
+        if not node_names:
+            node_names = _default_memory_node_names()
         datasets = self.get_search_datasets() if include_default else [self.dataset_name]
         from .cognee_background import CogneeBackgroundWorker
 
         worker = CogneeBackgroundWorker.get_instance()
+        touch_memory_activity()
         block_reason = worker.get_search_block_reason(datasets)
         if block_reason:
             PrintStyle.warning(f"cognee.search skipped: {block_reason}")
@@ -278,7 +303,7 @@ class Memory:
                 top_k=limit,
                 datasets=datasets,
                 node_type=NodeSet,
-                node_name=node_names if node_names else None,
+                node_name=node_names,
                 session_id=session_id,
                 only_context=True,
                 # Cognee verbose controls result shape: objects_result carries node metadata.
@@ -388,6 +413,7 @@ class Memory:
         ids = []
         insert_errors: list[str] = []
         from .cognee_background import CogneeBackgroundWorker
+        worker = CogneeBackgroundWorker.get_instance()
 
         for doc in docs:
             area = doc.metadata.get("area", Memory.Area.MAIN.value)
@@ -395,6 +421,7 @@ class Memory:
                 area = Memory.Area.MAIN.value
 
             try:
+                touch_memory_activity()
                 await run_cognee_operation(
                     "cognee.add memory",
                     cognee.add,
@@ -410,7 +437,7 @@ class Memory:
                     doc.metadata,
                 )
                 ids.append(content_id)
-                CogneeBackgroundWorker.get_instance().mark_dirty(self.dataset_name)
+                worker.mark_dirty(self.dataset_name)
             except Exception as e:
                 error = f"{type(e).__name__}: {e}"
                 insert_errors.append(error)
@@ -541,6 +568,10 @@ def _parse_filter_to_node_names(filter_str: str) -> list[str]:
     return node_names
 
 
+def _default_memory_node_names() -> list[str]:
+    return [area.value for area in Memory.Area]
+
+
 def recall_text_and_feedback_items(
     answers: Any,
     limit: int,
@@ -580,8 +611,8 @@ def split_recall_answers_by_area(
     memory_limit: int,
     solution_limit: int,
 ) -> tuple[list[Document], list[Document]]:
-    """Split one broad recall result into normal memories and solutions."""
-    docs = _results_to_documents(answers or [], memory_limit + solution_limit)
+    """Split Cognee-ranked recall results into normal memories and solutions."""
+    docs = _deduplicate_documents(_results_to_documents(answers or [], None))
     memories: list[Document] = []
     solutions: list[Document] = []
 
@@ -599,7 +630,7 @@ def split_recall_answers_by_area(
 
 def _document_area(doc: Document) -> str:
     metadata = getattr(doc, "metadata", {}) or {}
-    for key in ("area", "node_set", "node_name"):
+    for key in _area_metadata_keys():
         raw = metadata.get(key)
         if raw:
             area = _normalize_area(raw)
@@ -611,10 +642,126 @@ def _document_area(doc: Document) -> str:
 def _normalize_area(raw: Any) -> str:
     area = parse_node_set_area(raw)
     valid = {item.value for item in Memory.Area}
-    return area if area in valid else ""
+    if area in valid:
+        return area
+    if isinstance(area, str):
+        for part in area.replace("[", "").replace("]", "").split(","):
+            candidate = part.strip().strip("'\"").lower()
+            if candidate in valid:
+                return candidate
+    return ""
 
 
-def _results_to_documents(results: Any, limit: int) -> list[Document]:
+def _area_metadata_keys() -> tuple[str, ...]:
+    return (
+        "area",
+        "node_set",
+        "node_name",
+        "belongs_to_set",
+        "source_node_set",
+        "nodeSet",
+        "nodeName",
+        "belongsToSet",
+        "sourceNodeSet",
+    )
+
+
+def _copy_recall_metadata(source: Any, metadata: dict[str, Any]) -> None:
+    if not isinstance(source, dict):
+        return
+
+    nested_metadata = source.get("metadata")
+    if isinstance(nested_metadata, dict):
+        metadata.update(nested_metadata)
+
+    for key in _area_metadata_keys() + ("type", "score"):
+        if source.get(key) is not None:
+            metadata[key] = source[key]
+
+    if source.get("id"):
+        metadata["id"] = str(source["id"])
+    elif source.get("qa_id"):
+        metadata["id"] = str(source["qa_id"])
+
+
+def _copy_recall_object_metadata(source: Any, metadata: dict[str, Any]) -> None:
+    raw_metadata = getattr(source, "metadata", {})
+    if isinstance(raw_metadata, dict):
+        metadata.update(raw_metadata)
+
+    for nested_attr in ("payload", "raw"):
+        _copy_recall_metadata(getattr(source, nested_attr, None), metadata)
+
+    for key in _area_metadata_keys() + ("type", "score"):
+        if hasattr(source, key):
+            value = getattr(source, key)
+            if value is not None:
+                metadata[key] = value
+
+    if getattr(source, "id", None):
+        metadata["id"] = str(getattr(source, "id"))
+    elif getattr(source, "qa_id", None):
+        metadata["id"] = str(getattr(source, "qa_id"))
+
+
+def _content_from_recall_dict(item: dict[str, Any]) -> str:
+    source = str(item.get("source") or item.get("_source") or "")
+    if source == "session" or ("question" in item and "answer" in item):
+        question = str(item.get("question") or "").strip()
+        context = str(item.get("context") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        parts = []
+        if question:
+            parts.append(f"Q: {question}")
+        if context:
+            parts.append(f"Context: {context}")
+        if answer:
+            parts.append(f"A: {answer}")
+        if parts:
+            return "\n".join(parts)
+
+    if source == "trace":
+        origin = str(item.get("origin_function") or "").strip()
+        status = str(item.get("status") or "").strip()
+        feedback = str(item.get("session_feedback") or "").strip()
+        output = item.get("method_return_value")
+        if isinstance(output, (dict, list)):
+            try:
+                output = json.dumps(output, ensure_ascii=False)
+            except Exception:
+                output = str(output)
+        output = str(output or "").strip()
+        parts = []
+        if origin or status:
+            parts.append(f"Trace: {origin} {status}".strip())
+        if feedback:
+            parts.append(f"Feedback: {feedback}")
+        if output:
+            parts.append(f"Output: {output}")
+        if parts:
+            return "\n".join(parts)
+
+    if source == "graph_context":
+        content = str(item.get("content") or item.get("text") or "").strip()
+        if content:
+            return content
+
+    for key in ("text", "content", "completion", "summary", "answer"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    for nested_key in ("payload", "raw"):
+        nested = item.get(nested_key)
+        if isinstance(nested, dict):
+            content = _content_from_recall_dict(nested)
+            if content:
+                return content
+
+    return ""
+
+
+def _results_to_documents(results: Any, limit: int | None) -> list[Document]:
     docs = []
     if not results:
         return docs
@@ -622,7 +769,7 @@ def _results_to_documents(results: Any, limit: int) -> list[Document]:
     flat = _flatten_search_results(results)
 
     for item, dataset_name in flat:
-        if len(docs) >= limit:
+        if limit is not None and len(docs) >= limit:
             break
 
         content = ""
@@ -631,17 +778,13 @@ def _results_to_documents(results: Any, limit: int) -> list[Document]:
         if isinstance(item, str):
             content = item
         elif isinstance(item, dict):
-            content = item.get("text", item.get("content", ""))
-            raw_metadata = item.get("metadata")
-            if isinstance(raw_metadata, dict):
-                metadata.update(raw_metadata)
-            if item.get("id"):
-                metadata["id"] = str(item["id"])
-            for key in ("area", "node_set", "node_name", "type"):
-                if item.get(key) is not None:
-                    metadata[key] = item[key]
+            content = _content_from_recall_dict(item)
+            _copy_recall_metadata(item, metadata)
+            for nested_key in ("payload", "raw"):
+                _copy_recall_metadata(item.get(nested_key), metadata)
         elif hasattr(item, "text"):
             content = str(item.text)
+            _copy_recall_object_metadata(item, metadata)
         elif hasattr(item, "page_content"):
             content = item.page_content
             metadata = getattr(item, "metadata", {})
@@ -670,40 +813,108 @@ def _flatten_search_results(results: Any) -> list[tuple[Any, str]]:
         return flat
 
     for result in results:
+        if hasattr(result, "page_content") or hasattr(result, "text"):
+            flat.append((result, _extract_dataset_name(result)))
+            continue
+
+        if hasattr(result, "model_dump"):
+            result = result.model_dump()
+
         ds = ""
         objects = None
 
         if isinstance(result, dict):
-            ds = result.get("dataset_name", "") or ""
+            ds = result.get("dataset_name", "") or result.get("dataset", "") or ""
             objects = result.get("objects_result")
         elif hasattr(result, "dataset_name"):
             ds = str(getattr(result, "dataset_name", "") or "")
             objects = (getattr(result, "objects_result", None)
                        or getattr(result, "result_object", None))
 
-        if objects and isinstance(objects, list):
-            _extract_nodes_to_flat(objects, str(ds), flat)
+        if (
+            isinstance(result, dict)
+            and ("text" in result or "content" in result)
+            and "search_result" not in result
+            and "context_result" not in result
+            and "objects_result" not in result
+        ):
+            flat.append((result, str(ds)))
             continue
 
         sr = None
         if isinstance(result, dict):
-            sr = result.get("search_result") or result.get("context_result")
+            sr = result.get("search_result")
+            if sr is None:
+                sr = result.get("context_result")
             if sr is None:
                 sr = result.get("text")
-        elif hasattr(result, "search_result"):
-            sr = result.search_result
+        else:
+            if hasattr(result, "search_result"):
+                sr = result.search_result
+            if sr is None and hasattr(result, "context_result"):
+                sr = result.context_result
+
+        if _append_search_payload_to_flat(sr, str(ds), flat):
+            continue
+
+        if objects and isinstance(objects, list):
+            before_count = len(flat)
+            _extract_nodes_to_flat(objects, str(ds), flat)
+            if len(flat) > before_count:
+                continue
 
         if sr is None:
-            sr = result
-
-        if isinstance(sr, str) and sr.strip():
-            flat.append((sr.strip(), str(ds)))
-        elif isinstance(sr, list):
-            joined = "\n".join(str(item).strip() for item in sr if item)
-            if joined.strip():
-                flat.append((joined.strip(), str(ds)))
+            _append_search_payload_to_flat(result, str(ds), flat)
 
     return flat
+
+
+def _append_search_payload_to_flat(
+    payload: Any,
+    dataset_name: str,
+    flat: list[tuple[Any, str]],
+) -> bool:
+    before_count = len(flat)
+    if payload is None:
+        return False
+
+    if isinstance(payload, str):
+        text = payload.strip()
+        if text:
+            flat.append((text, dataset_name))
+    elif isinstance(payload, list):
+        for item in payload:
+            if not item:
+                continue
+            if isinstance(item, dict):
+                flat.append(
+                    (
+                        item,
+                        str(
+                            item.get("dataset_name")
+                            or item.get("dataset")
+                            or dataset_name
+                        ),
+                    )
+                )
+            else:
+                text = str(item).strip()
+                if text:
+                    flat.append((text, dataset_name))
+    elif isinstance(payload, dict):
+        flat.append(
+            (
+                payload,
+                str(
+                    payload.get("dataset_name")
+                    or payload.get("dataset")
+                    or dataset_name
+                ),
+            )
+        )
+    elif hasattr(payload, "page_content") or hasattr(payload, "text"):
+        flat.append((payload, _extract_dataset_name(payload) or dataset_name))
+    return len(flat) > before_count
 
 
 def _extract_nodes_to_flat(
@@ -749,7 +960,7 @@ def _extract_nodes_to_flat(
 
 
 def _area_from_node_attrs(attrs: dict[str, Any]) -> str:
-    for key in ("area", "node_set", "node_name"):
+    for key in _area_metadata_keys():
         raw = attrs.get(key)
         if raw:
             area = _normalize_area(raw)
@@ -979,9 +1190,7 @@ def get_custom_knowledge_subdir_abs(agent: Agent) -> str:
 
 def reload():
     from . import cognee_init as ci
-    ci._configured = False
-    ci._cognee_module = None
-    ci._search_type_class = None
+    ci.reset_cognee_init_state()
     Memory._initialized_subdirs.clear()
     Memory._datasets_cache.clear()
     Memory._invalidate_datasets_cache()
