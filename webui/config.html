@@ -91,12 +91,42 @@
                     <div class="field-label">
                         <div class="field-title">Memory auto-recall history length</div>
                         <div class="field-description">
-                            The length of conversation history passed to memory recall LLM for context (in characters).
+                            The length of conversation history passed to memory query preparation for context (in characters).
                         </div>
                     </div>
                     <div class="field-control">
                         <input type="number"
                             x-model.number="config.memory_recall_history_len" />
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Prepare auto-recall query</div>
+                        <div class="field-description">
+                            Use the utility model to turn the current message and recent context into a focused Cognee search query.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox" x-model="config.memory_recall_query_prep" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Cognee session memory</div>
+                        <div class="field-description">
+                            Store recent chat turns in Cognee session memory and include that scope during auto-recall.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox" x-model="config.memory_session_enabled" />
+                            <span class="toggler"></span>
+                        </label>
                     </div>
                 </div>
 

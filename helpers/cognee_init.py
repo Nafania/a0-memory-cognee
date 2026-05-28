@@ -6,6 +6,7 @@ import asyncio
 import json
 import shutil
 import uuid
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -21,7 +22,6 @@ _COGNEE_DEFAULTS: dict[str, Any] = {
     "cognee_search_types": "GRAPH_COMPLETION",
     "cognee_multi_search_enabled": True,
     "cognee_cognify_interval": 5,
-    "cognee_cognify_after_n_inserts": 10,
     "cognee_temporal_enabled": True,
     "cognee_memify_enabled": True,
     "cognee_feedback_enabled": True,
@@ -79,6 +79,59 @@ _LEGACY_DEFAULT_EMBEDDING_CONFIG: dict[str, str] = {
     "api_base": "",
 }
 _embedding_rebuild_scheduled = False
+
+_SECRET_VALUE_RE = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
+_SECRET_FIELD_RE = re.compile(
+    r"((?:api[_-]?key|llm_api_key|embedding_api_key)[\"']?\s*[:=]\s*[\"']?)([^\"'\s,}]+)",
+    re.IGNORECASE,
+)
+
+
+def _redact_log_text(text: str) -> str:
+    redacted = _SECRET_FIELD_RE.sub(r"\1***", str(text))
+    return _SECRET_VALUE_RE.sub("sk-***", redacted)
+
+
+def _is_secret_log_key(key: Any) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return normalized in {"api_key", "llm_api_key", "embedding_api_key"} or normalized.endswith(
+        "_api_key"
+    )
+
+
+def _redact_log_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_log_text(value)
+    if isinstance(value, dict):
+        return {
+            key: "***" if _is_secret_log_key(key) else _redact_log_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_redact_log_value(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_log_value(item) for item in value]
+    return value
+
+
+class _SecretRedactionFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.msg, (dict, list, tuple)):
+                record.msg = _redact_log_value(record.msg)
+                record.args = _redact_log_value(record.args)
+            else:
+                record.msg = _redact_log_text(record.getMessage())
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+def _ensure_secret_redaction_filter(logger: logging.Logger) -> None:
+    if any(isinstance(existing, _SecretRedactionFilter) for existing in logger.filters):
+        return
+    logger.addFilter(_SecretRedactionFilter())
 
 
 def reset_cognee_init_state() -> None:
@@ -143,6 +196,7 @@ def _configure_cognee_logging() -> None:
         os.environ.setdefault("LITELLM_SET_VERBOSE", "False")
 
     level = getattr(logging, level_name, logging.WARNING)
+    _ensure_secret_redaction_filter(logging.getLogger())
     for logger_name in (
         "cognee",
         "GraphCompletionRetriever",
@@ -153,7 +207,19 @@ def _configure_cognee_logging() -> None:
         "openai",
         "urllib3",
     ):
-        logging.getLogger(logger_name).setLevel(level)
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(level)
+        _ensure_secret_redaction_filter(logger)
+
+    # These libraries can dump full LLM request kwargs, including api_key, in
+    # debug mode. Plugin debug UI traces stay enabled without raw secret logs.
+    for logger_name in (
+        "instructor",
+        "cognee.shared.logging_utils",
+    ):
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.WARNING)
+        _ensure_secret_redaction_filter(logger)
 
 
 def _map_provider(a0_provider: str) -> str:

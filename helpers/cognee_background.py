@@ -1240,8 +1240,13 @@ async def _run_cognify_with_corrupt_wal_repair(
     temporal_enabled: bool,
     cognify_kwargs: dict[str, Any],
     operation_timeout: float | None,
+    gate_timeout: float,
 ) -> None:
-    await _preflight_graph_store_for_rebuild(cognee, dataset)
+    await _preflight_graph_store_for_rebuild(
+        cognee,
+        dataset,
+        gate_timeout=gate_timeout,
+    )
 
     async def run_once() -> None:
         await run_cognee_operation(
@@ -1250,6 +1255,7 @@ async def _run_cognify_with_corrupt_wal_repair(
             datasets=[dataset],
             temporal_cognify=temporal_enabled,
             **cognify_kwargs,
+            timeout=gate_timeout,
             operation_timeout=operation_timeout,
         )
 
@@ -1266,7 +1272,12 @@ async def _run_cognify_with_corrupt_wal_repair(
         await run_once()
 
 
-async def _preflight_graph_store_for_rebuild(cognee: Any, dataset: str) -> None:
+async def _preflight_graph_store_for_rebuild(
+    cognee: Any,
+    dataset: str,
+    *,
+    gate_timeout: float,
+) -> None:
     child_baseline_pids = _active_child_pids()
     dataset_graphs = await run_cognee_operation(
         "cognee.graph rebuild preflight",
@@ -1276,6 +1287,7 @@ async def _preflight_graph_store_for_rebuild(cognee: Any, dataset: str) -> None:
         skip_empty_data=False,
         repair_unreadable=True,
         include_graph_data=False,
+        timeout=gate_timeout,
     )
     errors = _graph_read_errors(dataset_graphs)
     if _contains_corrupt_wal_error(errors):
@@ -1291,6 +1303,7 @@ async def _preflight_graph_store_for_rebuild(cognee: Any, dataset: str) -> None:
             skip_empty_data=False,
             repair_unreadable=True,
             include_graph_data=False,
+            timeout=gate_timeout,
         )
 
     errors = _graph_read_errors(dataset_graphs)
@@ -1333,6 +1346,7 @@ class CogneeBackgroundWorker:
         self._dirty_versions: dict[str, int] = {}
         self._insert_count: int = 0
         self._last_cognify_time: float = time.monotonic()
+        self._last_activity_time: float = self._last_cognify_time
         self._running: bool = False
         self._run_scheduled: bool = False
         self._run_scheduled_force: bool = False
@@ -1361,6 +1375,7 @@ class CogneeBackgroundWorker:
     ) -> None:
         """Mark a dataset as having new data."""
         with self._state_lock:
+            self._last_activity_time = time.monotonic()
             self._dirty_datasets.add(dataset_name)
             self._dirty_versions[dataset_name] = self._dirty_versions.get(dataset_name, 0) + 1
             if reset_retry:
@@ -1378,6 +1393,11 @@ class CogneeBackgroundWorker:
                 readable=readable,
             )
         self._schedule_run_soon(force=not preserve_readable or not readable)
+
+    def mark_activity(self) -> None:
+        """Record user-path memory activity so background rebuild waits for idle."""
+        with self._state_lock:
+            self._last_activity_time = time.monotonic()
 
     def mark_datasets_readable(
         self,
@@ -1600,7 +1620,6 @@ class CogneeBackgroundWorker:
         """Load cognee-related settings."""
         return {
             "cognify_interval": get_cognee_setting("cognee_cognify_interval", 5),
-            "cognify_after_n_inserts": get_cognee_setting("cognee_cognify_after_n_inserts", 10),
             "temporal_enabled": get_cognee_setting("cognee_temporal_enabled", True),
             "memify_enabled": get_cognee_setting("cognee_memify_enabled", True),
             "retry_min_delay": get_cognee_setting("cognee_rebuild_retry_min_seconds", 30),
@@ -1612,29 +1631,54 @@ class CogneeBackgroundWorker:
         }
 
     async def _should_run(self) -> bool:
-        """Check if pipeline should run based on time and insert thresholds."""
+        """Run only when search is unreadable or readable data has been idle."""
         config = self._get_config()
         interval_minutes = config["cognify_interval"]
-        insert_threshold = config["cognify_after_n_inserts"]
 
         with self._state_lock:
             dirty_count = len(self._dirty_datasets)
-            insert_count = self._insert_count
-            last_cognify_time = self._last_cognify_time
+            last_activity_time = self._last_activity_time
+            has_unreadable_dirty = any(
+                not self._dataset_has_readable_snapshot_locked(dataset)
+                for dataset in self._dirty_datasets
+            )
 
         if not dirty_count:
             return False
+        if has_unreadable_dirty:
+            return True
 
-        time_elapsed_minutes = (time.monotonic() - last_cognify_time) / 60
-        time_trigger = time_elapsed_minutes >= interval_minutes
-        insert_trigger = insert_count >= insert_threshold
+        time_elapsed_minutes = (time.monotonic() - last_activity_time) / 60
+        return time_elapsed_minutes >= interval_minutes
 
-        return time_trigger or insert_trigger
+    def _next_idle_rebuild_delay(self) -> float | None:
+        """Return seconds until readable dirty datasets should be checked again."""
+        config = self._get_config()
+        interval_seconds = float(config["cognify_interval"]) * 60
+        if interval_seconds <= 0:
+            return 0
+
+        with self._state_lock:
+            if not self._dirty_datasets:
+                return None
+            has_unreadable_dirty = any(
+                not self._dataset_has_readable_snapshot_locked(dataset)
+                for dataset in self._dirty_datasets
+            )
+            if has_unreadable_dirty:
+                return 0
+            elapsed_seconds = time.monotonic() - self._last_activity_time
+
+        remaining = interval_seconds - elapsed_seconds
+        if remaining <= 0:
+            return 0
+        return max(1.0, remaining)
 
     async def run_pipeline(self) -> None:
         """Run cognify + memify on dirty datasets."""
         should_reschedule = False
         reschedule_delay: float | None = None
+        reschedule_force = False
         mark_embedding_config_applied = False
         with self._state_lock:
             if self._running or not self._dirty_datasets:
@@ -1675,9 +1719,10 @@ class CogneeBackgroundWorker:
                     )
                 self._running = False
                 should_reschedule = bool(self._dirty_datasets)
+                reschedule_force = should_reschedule
             PrintStyle.error(f"Cognee background: cognee import failed: {e}")
             if should_reschedule:
-                self._schedule_run_soon(retry_delay, force=True)
+                self._schedule_run_soon(retry_delay, force=reschedule_force)
             return
 
         try:
@@ -1767,17 +1812,23 @@ class CogneeBackgroundWorker:
                             f"chunks_per_batch={chunks_per_batch or 'cognee-default'})"
                         )
 
+                        gate_timeout = float(config["operation_timeout"])
                         await _run_cognify_with_corrupt_wal_repair(
                             cognee,
                             dataset,
                             temporal_enabled=bool(config["temporal_enabled"]),
                             cognify_kwargs=cognify_kwargs,
                             operation_timeout=cognify_operation_timeout,
+                            gate_timeout=gate_timeout,
                         )
 
                         PrintStyle.standard(f"Cognee cognify completed for dataset: {dataset}")
 
-                    readiness_error = await _verify_cognify_ready(cognee, [dataset])
+                    readiness_error = await _verify_cognify_ready(
+                        cognee,
+                        [dataset],
+                        gate_timeout=float(config["operation_timeout"]),
+                    )
                     if readiness_error:
                         operation = "vector rebuild" if rebuilt_vectors_only else "cognify"
                         raise RuntimeError(
@@ -1791,6 +1842,7 @@ class CogneeBackgroundWorker:
                                 "cognee.improve background",
                                 cognee.improve,
                                 dataset=dataset,
+                                timeout=float(config["operation_timeout"]),
                                 operation_timeout=float(config["operation_timeout"]),
                             )
                             PrintStyle.standard(f"Cognee improve completed for dataset: {dataset}")
@@ -1802,7 +1854,11 @@ class CogneeBackgroundWorker:
                             else:
                                 raise
 
-                        readiness_error = await _verify_cognify_ready(cognee, [dataset])
+                        readiness_error = await _verify_cognify_ready(
+                            cognee,
+                            [dataset],
+                            gate_timeout=float(config["operation_timeout"]),
+                        )
                         if readiness_error:
                             raise RuntimeError(
                                 "Cognee improve completed but "
@@ -1893,6 +1949,7 @@ class CogneeBackgroundWorker:
                 if failed_datasets:
                     should_reschedule = bool(self._dirty_datasets)
                     reschedule_delay = max(retry_delays) if retry_delays else None
+                    reschedule_force = should_reschedule
                     self._last_run_success = False
                 elif self._dirty_datasets:
                     should_reschedule = True
@@ -1932,25 +1989,33 @@ class CogneeBackgroundWorker:
                 )
                 if unfinished_datasets:
                     should_reschedule = True
+                    reschedule_force = True
                     reschedule_delay = max(
                         retry_delay,
                         float(reschedule_delay or 0),
                     )
                 self._running = False
+                if self._dirty_datasets and not should_reschedule:
+                    should_reschedule = True
             for dataset in unfinished_datasets:
                 PrintStyle.error(
                     "Cognee pipeline did not complete readiness update",
                     f"dataset={dataset}",
                 )
+            if should_reschedule and not reschedule_force:
+                idle_delay = self._next_idle_rebuild_delay()
+                if idle_delay is not None:
+                    reschedule_delay = idle_delay
+                    reschedule_force = idle_delay <= 0
             self._log_rebuild_readiness(
                 retry_scheduled=should_reschedule,
                 retry_delay=reschedule_delay,
             )
             if should_reschedule:
-                self._schedule_run_soon(reschedule_delay, force=True)
+                self._schedule_run_soon(reschedule_delay, force=reschedule_force)
 
     async def maybe_run_pipeline(self) -> None:
-        """Check if pipeline should run based on thresholds, then run if so."""
+        """Run pipeline only when dataset readability or idle timing allows it."""
         if await self._should_run():
             await self.run_pipeline()
 
@@ -2009,6 +2074,7 @@ class CogneeBackgroundWorker:
             self._run_scheduled_force = False
 
     async def _run_after_delay(self, delay: float, *, force: bool = False) -> None:
+        reschedule_delay: float | None = None
         try:
             if delay > 0:
                 await asyncio.sleep(delay)
@@ -2018,12 +2084,16 @@ class CogneeBackgroundWorker:
                 self._run_scheduled_force = False
             if force:
                 await self.run_pipeline()
+            elif await self._should_run():
+                await self.run_pipeline()
             else:
-                await self.maybe_run_pipeline()
+                reschedule_delay = self._next_idle_rebuild_delay()
         finally:
             with self._state_lock:
                 self._run_scheduled = False
                 self._run_scheduled_force = False
+        if reschedule_delay is not None:
+            self._schedule_run_soon(reschedule_delay)
 
     def _log_rebuild_readiness(
         self,
@@ -2069,8 +2139,16 @@ def _is_empty_graph_improve_error(error: Exception) -> bool:
     return "entitynotfounderror" in message and "empty graph projected" in message
 
 
-async def _verify_cognify_ready(cognee, datasets: list[str]) -> str:
+async def _verify_cognify_ready(
+    cognee,
+    datasets: list[str],
+    *,
+    gate_timeout: float | None = None,
+) -> str:
     """Return an error reason if cognify did not produce a readable graph."""
+    operation_kwargs = {}
+    if gate_timeout is not None:
+        operation_kwargs["timeout"] = gate_timeout
     dataset_graphs = await run_cognee_operation(
         "cognee.graph readiness",
         read_dataset_graphs,
@@ -2079,6 +2157,7 @@ async def _verify_cognify_ready(cognee, datasets: list[str]) -> str:
         skip_empty_data=False,
         repair_unreadable=True,
         include_graph_data=False,
+        **operation_kwargs,
     )
     if not dataset_graphs:
         return "graph readiness could not be verified"

@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: memory-cognee-tests
+        name: memory_cognee tests
+        entry: tools/precommit_tests.sh
+        language: system
+        pass_filenames: false
+        always_run: true

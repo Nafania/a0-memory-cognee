@@ -23,6 +23,17 @@ class SearchUnavailable(RuntimeError):
     pass
 
 
+def touch_memory_activity() -> None:
+    try:
+        from .cognee_background import CogneeBackgroundWorker
+
+        mark_activity = getattr(CogneeBackgroundWorker.get_instance(), "mark_activity", None)
+        if callable(mark_activity):
+            mark_activity()
+    except Exception:
+        return
+
+
 def _get_cognee():
     from .cognee_init import get_cognee
     return get_cognee()
@@ -273,6 +284,7 @@ class Memory:
         from .cognee_background import CogneeBackgroundWorker
 
         worker = CogneeBackgroundWorker.get_instance()
+        touch_memory_activity()
         block_reason = worker.get_search_block_reason(datasets)
         if block_reason:
             PrintStyle.warning(f"cognee.search skipped: {block_reason}")
@@ -401,6 +413,7 @@ class Memory:
         ids = []
         insert_errors: list[str] = []
         from .cognee_background import CogneeBackgroundWorker
+        worker = CogneeBackgroundWorker.get_instance()
 
         for doc in docs:
             area = doc.metadata.get("area", Memory.Area.MAIN.value)
@@ -408,6 +421,7 @@ class Memory:
                 area = Memory.Area.MAIN.value
 
             try:
+                touch_memory_activity()
                 await run_cognee_operation(
                     "cognee.add memory",
                     cognee.add,
@@ -423,7 +437,7 @@ class Memory:
                     doc.metadata,
                 )
                 ids.append(content_id)
-                CogneeBackgroundWorker.get_instance().mark_dirty(self.dataset_name)
+                worker.mark_dirty(self.dataset_name)
             except Exception as e:
                 error = f"{type(e).__name__}: {e}"
                 insert_errors.append(error)
@@ -666,6 +680,8 @@ def _copy_recall_metadata(source: Any, metadata: dict[str, Any]) -> None:
 
     if source.get("id"):
         metadata["id"] = str(source["id"])
+    elif source.get("qa_id"):
+        metadata["id"] = str(source["qa_id"])
 
 
 def _copy_recall_object_metadata(source: Any, metadata: dict[str, Any]) -> None:
@@ -684,9 +700,52 @@ def _copy_recall_object_metadata(source: Any, metadata: dict[str, Any]) -> None:
 
     if getattr(source, "id", None):
         metadata["id"] = str(getattr(source, "id"))
+    elif getattr(source, "qa_id", None):
+        metadata["id"] = str(getattr(source, "qa_id"))
 
 
 def _content_from_recall_dict(item: dict[str, Any]) -> str:
+    source = str(item.get("source") or item.get("_source") or "")
+    if source == "session" or ("question" in item and "answer" in item):
+        question = str(item.get("question") or "").strip()
+        context = str(item.get("context") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        parts = []
+        if question:
+            parts.append(f"Q: {question}")
+        if context:
+            parts.append(f"Context: {context}")
+        if answer:
+            parts.append(f"A: {answer}")
+        if parts:
+            return "\n".join(parts)
+
+    if source == "trace":
+        origin = str(item.get("origin_function") or "").strip()
+        status = str(item.get("status") or "").strip()
+        feedback = str(item.get("session_feedback") or "").strip()
+        output = item.get("method_return_value")
+        if isinstance(output, (dict, list)):
+            try:
+                output = json.dumps(output, ensure_ascii=False)
+            except Exception:
+                output = str(output)
+        output = str(output or "").strip()
+        parts = []
+        if origin or status:
+            parts.append(f"Trace: {origin} {status}".strip())
+        if feedback:
+            parts.append(f"Feedback: {feedback}")
+        if output:
+            parts.append(f"Output: {output}")
+        if parts:
+            return "\n".join(parts)
+
+    if source == "graph_context":
+        content = str(item.get("content") or item.get("text") or "").strip()
+        if content:
+            return content
+
     for key in ("text", "content", "completion", "summary", "answer"):
         value = item.get(key)
         if isinstance(value, str) and value:
@@ -757,6 +816,9 @@ def _flatten_search_results(results: Any) -> list[tuple[Any, str]]:
         if hasattr(result, "page_content") or hasattr(result, "text"):
             flat.append((result, _extract_dataset_name(result)))
             continue
+
+        if hasattr(result, "model_dump"):
+            result = result.model_dump()
 
         ds = ""
         objects = None

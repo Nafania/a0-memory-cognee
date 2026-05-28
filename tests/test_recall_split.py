@@ -182,6 +182,47 @@ class RecallSplitTest(unittest.TestCase):
             ],
         )
 
+    def test_results_format_session_recall_entries(self):
+        memory = _load_memory_module()
+
+        docs = memory._results_to_documents(
+            [
+                {
+                    "source": "session",
+                    "question": "Where do we live?",
+                    "answer": "Only Timofey living in Vilnius is reliable.",
+                    "qa_id": "qa-1",
+                }
+            ],
+            limit=5,
+        )
+
+        self.assertEqual(
+            [doc.page_content for doc in docs],
+            ["Q: Where do we live?\nA: Only Timofey living in Vilnius is reliable."],
+        )
+        self.assertEqual(docs[0].metadata["id"], "qa-1")
+
+    def test_results_format_pydantic_like_session_recall_entries(self):
+        memory = _load_memory_module()
+
+        class SessionEntry:
+            def model_dump(self):
+                return {
+                    "source": "session",
+                    "question": "What is saved?",
+                    "answer": "Session memory is saved.",
+                    "qa_id": "qa-2",
+                }
+
+        docs = memory._results_to_documents([SessionEntry()], limit=5)
+
+        self.assertEqual(
+            [doc.page_content for doc in docs],
+            ["Q: What is saved?\nA: Session memory is saved."],
+        )
+        self.assertEqual(docs[0].metadata["id"], "qa-2")
+
     def test_results_expand_ranked_chunk_payloads_preserving_cognee_order(self):
         memory = _load_memory_module()
 
@@ -237,6 +278,45 @@ class RecallSplitTest(unittest.TestCase):
 
         self.assertEqual([doc.page_content for doc in memories], ["first ranked memory chunk"])
         self.assertEqual([doc.page_content for doc in solutions], ["second ranked solution chunk"])
+
+    def test_split_filters_by_area_before_applying_per_area_limits(self):
+        memory = _load_memory_module()
+        answers = [
+            {
+                "text": "solution 1",
+                "metadata": {"area": "solutions"},
+                "id": "solution-1",
+            },
+            {
+                "text": "solution 2",
+                "metadata": {"area": "solutions"},
+                "id": "solution-2",
+            },
+            {
+                "text": "memory 1",
+                "metadata": {"area": "main"},
+                "id": "memory-1",
+            },
+            {
+                "text": "solution 3",
+                "metadata": {"area": "solutions"},
+                "id": "solution-3",
+            },
+            {
+                "text": "memory 2",
+                "metadata": {"area": "fragments"},
+                "id": "memory-2",
+            },
+        ]
+
+        memories, solutions = memory.split_recall_answers_by_area(
+            answers,
+            memory_limit=2,
+            solution_limit=2,
+        )
+
+        self.assertEqual([doc.page_content for doc in memories], ["memory 1", "memory 2"])
+        self.assertEqual([doc.page_content for doc in solutions], ["solution 1", "solution 2"])
 
     def test_split_uses_cognee_chunk_belongs_to_set_metadata(self):
         memory = _load_memory_module()
