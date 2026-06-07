@@ -17,7 +17,7 @@ class InstallDependenciesTest(unittest.TestCase):
     def test_requirements_pin_latest_stable_cognee(self):
         requirements = (REPO_ROOT / "requirements.txt").read_text()
 
-        self.assertIn("cognee[fastembed]==1.1.0", requirements)
+        self.assertIn("cognee[fastembed]==1.1.2", requirements)
 
     def test_cognee_debug_logs_are_disabled_by_default(self):
         default_config = (REPO_ROOT / "default_config.yaml").read_text()
