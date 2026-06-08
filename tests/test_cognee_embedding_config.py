@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import asyncio
 import os
@@ -16,6 +17,11 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
         self._old_env = {
             key: os.environ.get(key)
             for key in (
+                "LLM_PROVIDER",
+                "LLM_MODEL",
+                "LLM_API_KEY",
+                "LLM_API_BASE",
+                "LLM_ENDPOINT",
                 "EMBEDDING_PROVIDER",
                 "EMBEDDING_MODEL",
                 "EMBEDDING_DIMENSIONS",
@@ -56,6 +62,86 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
             "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         )
         self.assertEqual(os.environ["EMBEDDING_DIMENSIONS"], "384")
+
+    def test_utility_model_change_reconfigures_cognee_without_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model_config = {
+                "utility_model": {
+                    "provider": "openai",
+                    "name": "gpt-4.1-mini",
+                },
+                "embedding_model": {
+                    "provider": "huggingface",
+                    "name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+                },
+            }
+            module = self._load_module(tmp_dir, model_config=model_config)
+            cognee = sys.modules["cognee"]
+            reset_calls = []
+
+            async def reset_all():
+                reset_calls.append("reset")
+                return ["default"]
+
+            module.reset_cognify_status_for_all_datasets = reset_all
+
+            module.configure_cognee()
+            model_config["utility_model"] = {
+                "provider": "openai",
+                "name": "gpt-5.4-mini",
+            }
+            Path(sys.modules["helpers.plugins"].model_config_path).write_text("changed")
+
+            module.ensure_cognee_llm_config_current()
+
+        self.assertEqual(
+            [
+                call["llm_model"]
+                for call in cognee.config.llm_configs
+            ],
+            ["gpt-4.1-mini", "gpt-5.4-mini"],
+        )
+        self.assertEqual(reset_calls, [])
+        self.assertEqual(os.environ["LLM_MODEL"], "gpt-5.4-mini")
+
+    def test_utility_model_config_error_is_not_silenced(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module = self._load_module(tmp_dir)
+            cognee = sys.modules["cognee"]
+
+            def fail_set_llm_config(*args, **kwargs):
+                raise RuntimeError("broken llm config")
+
+            cognee.config.set_llm_config = fail_set_llm_config
+
+            with self.assertRaisesRegex(RuntimeError, "broken llm config"):
+                module.configure_cognee()
+
+    def test_llm_config_hot_path_does_not_reload_dotenv(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module = self._load_module(tmp_dir)
+            dotenv = sys.modules["helpers.dotenv"]
+
+            module.configure_cognee()
+            load_count = len(dotenv.load_calls)
+
+            module.ensure_cognee_llm_config_current()
+            module.ensure_cognee_llm_config_current()
+
+        self.assertEqual(len(dotenv.load_calls), load_count)
+
+    def test_llm_config_hot_path_uses_cached_model_config_when_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module = self._load_module(tmp_dir)
+            plugins = sys.modules["helpers.plugins"]
+
+            module.configure_cognee()
+            model_config_calls = plugins.model_config_calls
+
+            module.ensure_cognee_llm_config_current()
+            module.ensure_cognee_llm_config_current()
+
+        self.assertEqual(plugins.model_config_calls, model_config_calls)
 
     def test_configure_cognee_does_not_patch_agent_zero_watchdog(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -293,7 +379,7 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
 
             self.assertTrue(module._embedding_config_rebuild_needed(current))
 
-    def _load_module(self, tmp_dir: str):
+    def _load_module(self, tmp_dir: str, model_config: dict | None = None):
         helpers = types.ModuleType("helpers")
         dotenv = types.ModuleType("helpers.dotenv")
         files = types.ModuleType("helpers.files")
@@ -301,25 +387,41 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
         plugins = types.ModuleType("helpers.plugins")
         print_style = types.ModuleType("helpers.print_style")
 
-        dotenv.load_dotenv = lambda *args, **kwargs: None
+        dotenv.load_calls = []
+        dotenv.load_dotenv = lambda *args, **kwargs: dotenv.load_calls.append("load")
         dotenv.get_dotenv_value = lambda key, default=None: default
         files.get_abs_path = lambda *parts: os.path.join(tmp_dir, *parts)
         settings.get_settings = lambda: {"api_keys": {}}
+
+        model_config_state = model_config or {
+            "utility_model": {
+                "provider": "openai",
+                "name": "gpt-4.1-mini",
+            },
+            "embedding_model": {
+                "provider": "huggingface",
+                "name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            },
+        }
+        model_config_path = os.path.join(tmp_dir, "_model_config.json")
+        Path(model_config_path).write_text("{}")
+        plugins.CONFIG_FILE_NAME = "config.json"
+        plugins.CONFIG_DEFAULT_FILE_NAME = "default_config.yaml"
+        plugins.model_config_path = model_config_path
+        plugins.model_config_calls = 0
+        plugins.find_plugin_asset = lambda *args, **kwargs: {
+            "path": model_config_path,
+            "project_name": kwargs.get("project_name", ""),
+            "agent_profile": kwargs.get("agent_profile", ""),
+        }
+        plugins.find_plugin_dir = lambda *args, **kwargs: tmp_dir
 
         def get_plugin_config(name, *args, **kwargs):
             if name == "memory_cognee":
                 return {}
             if name == "_model_config":
-                return {
-                    "utility_model": {
-                        "provider": "openai",
-                        "name": "gpt-4.1-mini",
-                    },
-                    "embedding_model": {
-                        "provider": "huggingface",
-                        "name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-                    },
-                }
+                plugins.model_config_calls += 1
+                return copy.deepcopy(model_config_state)
             return {}
 
         plugins.get_plugin_config = get_plugin_config
@@ -348,11 +450,15 @@ class CogneeEmbeddingConfigTest(unittest.TestCase):
         cognee = types.ModuleType("cognee")
 
         class Config:
-            def set_llm_config(self, *args, **kwargs):
-                pass
+            def __init__(self):
+                self.llm_configs = []
+                self.llm_endpoints = []
 
-            def set_llm_endpoint(self, *args, **kwargs):
-                pass
+            def set_llm_config(self, value):
+                self.llm_configs.append(value)
+
+            def set_llm_endpoint(self, value):
+                self.llm_endpoints.append(value)
 
             def set_chunk_size(self, *args, **kwargs):
                 pass

@@ -308,6 +308,7 @@ def _install_stubs(
         types.SimpleNamespace(CHUNKS="CHUNKS", RAG_COMPLETION="RAG_COMPLETION"),
     )
     cognee_init.is_cognee_debug_enabled = lambda: bool(cfg.get("cognee_debug_enabled", False))
+    cognee_init.ensure_cognee_llm_config_current = lambda agent=None: None
 
     background = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_background")
 

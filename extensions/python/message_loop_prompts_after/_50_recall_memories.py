@@ -158,6 +158,7 @@ class RecallMemories(Extension):
                 session_id=session_id,
                 only_context=True,
                 verbose=True,
+                a0_agent=self.agent,
             )
             mem_answers, sol_answers = split_recall_answers_by_area(
                 combined_answers,

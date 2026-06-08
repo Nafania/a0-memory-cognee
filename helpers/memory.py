@@ -96,7 +96,7 @@ class Memory:
     async def get(agent: Agent) -> "Memory":
         memory_subdir = get_agent_memory_subdir(agent)
         dataset_name = _subdir_to_dataset(memory_subdir)
-        mem = Memory(dataset_name=dataset_name, memory_subdir=memory_subdir)
+        mem = Memory(dataset_name=dataset_name, memory_subdir=memory_subdir, agent=agent)
         if memory_subdir not in Memory._initialized_subdirs:
             Memory._initialized_subdirs.add(memory_subdir)
             knowledge_subdirs = get_knowledge_subdirs_by_memory_subdir(
@@ -135,9 +135,10 @@ class Memory:
         Memory._datasets_cache.clear()
         return await Memory.get(agent)
 
-    def __init__(self, dataset_name: str, memory_subdir: str):
+    def __init__(self, dataset_name: str, memory_subdir: str, agent: Agent | None = None):
         self.dataset_name = dataset_name
         self.memory_subdir = memory_subdir
+        self.agent = agent
         self._last_insert_errors: list[str] = []
 
     def get_search_datasets(self) -> list[str]:
@@ -207,7 +208,7 @@ class Memory:
 
         changed = False
         if all_ids_to_delete:
-            changed = await _batch_delete_by_ids(self.dataset_name, all_ids_to_delete) > 0
+            changed = await _batch_delete_by_ids(self.dataset_name, all_ids_to_delete, self.agent) > 0
 
         for file_key in index:
             entry = index[file_key]
@@ -223,6 +224,7 @@ class Memory:
                             content,
                             dataset_name=self.dataset_name,
                             node_set=[area],
+                            a0_agent=self.agent,
                         )
                         new_ids.append(content_hash_id(content, self.dataset_name))
                         changed = True
@@ -308,6 +310,7 @@ class Memory:
                 only_context=True,
                 # Cognee verbose controls result shape: objects_result carries node metadata.
                 verbose=True,
+                a0_agent=self.agent,
             )
         except Exception as e:
             PrintStyle.error(f"cognee.search failed: {e}")
@@ -340,7 +343,7 @@ class Memory:
             include_default=False,
         )
         if docs:
-            deleted = await _delete_matching_data_items(self.dataset_name, docs)
+            deleted = await _delete_matching_data_items(self.dataset_name, docs, self.agent)
             if deleted:
                 _mark_dataset_dirty(self.dataset_name)
                 _invalidate_dashboard_cache()
@@ -360,7 +363,7 @@ class Memory:
                 return []
 
             for data_id in list(id_set):
-                if await _try_delete_direct(cognee, target, data_id):
+                if await _try_delete_direct(cognee, target, data_id, self.agent):
                     removed.append(Document(page_content="", metadata={"id": data_id}))
                     id_set.discard(data_id)
 
@@ -378,6 +381,7 @@ class Memory:
                                 cognee.forget,
                                 data_id=item.id,
                                 dataset=target.id,
+                                a0_agent=self.agent,
                             )
                             removed.append(Document(page_content="", metadata={"id": data_id}))
                             id_set.discard(data_id)
@@ -428,6 +432,7 @@ class Memory:
                     doc.page_content,
                     dataset_name=self.dataset_name,
                     node_set=[area],
+                    a0_agent=self.agent,
                 )
                 content_id = content_hash_id(doc.page_content, self.dataset_name)
                 persist_metadata(
@@ -1037,7 +1042,7 @@ async def _find_dataset(dataset_name: str):
     return None
 
 
-async def _try_delete_direct(cognee, dataset, data_id: str) -> bool:
+async def _try_delete_direct(cognee, dataset, data_id: str, agent: Agent | None = None) -> bool:
     """Try deleting a data item using data_id as a Cognee native UUID."""
     try:
         import uuid
@@ -1047,6 +1052,7 @@ async def _try_delete_direct(cognee, dataset, data_id: str) -> bool:
             cognee.forget,
             data_id=data_id,
             dataset=dataset.id,
+            a0_agent=agent,
         )
         return True
     except (ValueError, TypeError):
@@ -1055,7 +1061,9 @@ async def _try_delete_direct(cognee, dataset, data_id: str) -> bool:
         return False
 
 
-async def _delete_matching_data_items(dataset_name: str, docs: list[Document]) -> int:
+async def _delete_matching_data_items(
+    dataset_name: str, docs: list[Document], agent: Agent | None = None
+) -> int:
     """Delete Cognee data items whose content matches any of the given documents."""
     cognee, _ = _get_cognee()
     deleted = 0
@@ -1084,6 +1092,7 @@ async def _delete_matching_data_items(dataset_name: str, docs: list[Document]) -
                         cognee.forget,
                         data_id=item.id,
                         dataset=target.id,
+                        a0_agent=agent,
                     )
                     deleted += 1
                 except Exception:
@@ -1093,7 +1102,7 @@ async def _delete_matching_data_items(dataset_name: str, docs: list[Document]) -
     return deleted
 
 
-async def _delete_data_by_id(dataset_name: str, data_id: str):
+async def _delete_data_by_id(dataset_name: str, data_id: str, agent: Agent | None = None):
     """Delete a data item by ID. Tries Cognee native UUID first, falls back to content hash."""
     cognee, _ = _get_cognee()
     try:
@@ -1101,7 +1110,7 @@ async def _delete_data_by_id(dataset_name: str, data_id: str):
         if not target:
             return False
 
-        if await _try_delete_direct(cognee, target, data_id):
+        if await _try_delete_direct(cognee, target, data_id, agent):
             return True
 
         data_items = await cognee.datasets.list_data(target.id)
@@ -1114,6 +1123,7 @@ async def _delete_data_by_id(dataset_name: str, data_id: str):
                     cognee.forget,
                     data_id=item.id,
                     dataset=target.id,
+                    a0_agent=agent,
                 )
                 return True
     except Exception as e:
@@ -1121,7 +1131,9 @@ async def _delete_data_by_id(dataset_name: str, data_id: str):
     return False
 
 
-async def _batch_delete_by_ids(dataset_name: str, ids: set[str]) -> int:
+async def _batch_delete_by_ids(
+    dataset_name: str, ids: set[str], agent: Agent | None = None
+) -> int:
     """Delete multiple data items in one pass. Single dataset lookup + single list_data call."""
     if not ids:
         return 0
@@ -1134,7 +1146,7 @@ async def _batch_delete_by_ids(dataset_name: str, ids: set[str]) -> int:
             return 0
 
         for data_id in list(remaining):
-            if await _try_delete_direct(cognee, target, data_id):
+            if await _try_delete_direct(cognee, target, data_id, agent):
                 deleted += 1
                 remaining.discard(data_id)
 
@@ -1152,6 +1164,7 @@ async def _batch_delete_by_ids(dataset_name: str, ids: set[str]) -> int:
                             cognee.forget,
                             data_id=item.id,
                             dataset=target.id,
+                            a0_agent=agent,
                         )
                         deleted += 1
                         remaining.discard(item_hash)

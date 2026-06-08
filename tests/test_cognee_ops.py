@@ -20,6 +20,9 @@ def _load_cognee_ops_module():
         package = types.ModuleType(name)
         package.__path__ = [str(REPO_ROOT / "helpers")] if name.endswith(".helpers") else []
         sys.modules[name] = package
+    cognee_init = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_init")
+    cognee_init.ensure_cognee_llm_config_current = lambda a0_agent=None: None
+    sys.modules["usr.plugins.memory_cognee.helpers.cognee_init"] = cognee_init
 
     module_path = REPO_ROOT / "helpers" / "cognee_ops.py"
     spec = importlib.util.spec_from_file_location(
@@ -101,6 +104,31 @@ class CogneeOpsTest(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual(call_observed_stale_terminated, [True])
+
+    def test_run_cognee_operation_refreshes_llm_config_before_call(self):
+        agent = object()
+        refresh_calls = []
+        operation_calls = []
+        self.module.multiprocessing.active_children = lambda: []
+        self.module._child_holds_cognee_file = lambda pid: False
+
+        cognee_init = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_init")
+        cognee_init.ensure_cognee_llm_config_current = (
+            lambda a0_agent=None: refresh_calls.append(a0_agent)
+        )
+        sys.modules["usr.plugins.memory_cognee.helpers.cognee_init"] = cognee_init
+
+        def operation():
+            operation_calls.append("called")
+            return "ok"
+
+        result = asyncio.run(
+            self.module.run_cognee_operation("test search", operation, a0_agent=agent)
+        )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(refresh_calls, [agent])
+        self.assertEqual(operation_calls, ["called"])
 
     def test_run_cognee_operation_preserves_unrelated_baseline_child(self):
         baseline_child = FakeChild(404)

@@ -93,6 +93,7 @@ async def remember_session_turn(agent) -> bool:
         self_improvement=False,
         timeout=operation_timeout,
         operation_timeout=operation_timeout,
+        a0_agent=agent,
     )
     status = str(getattr(result, "status", "") or "")
     if status == "errored":

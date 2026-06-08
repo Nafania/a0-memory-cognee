@@ -70,6 +70,7 @@ def _install_stubs(cognee_module):
 
     cognee_init = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_init")
     cognee_init.get_cognee_setting = lambda key, default=None: default
+    cognee_init.ensure_cognee_llm_config_current = lambda agent=None: None
 
     sys.modules.update(
         {
