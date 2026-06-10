@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 import time
 from typing import Any
 
@@ -174,7 +175,7 @@ async def _read_current_graph_engine(
 
 def _repair_corrupt_kuzu_wal(error: Exception) -> bool:
     message = str(error).lower()
-    if "corrupted wal file" not in message and "invalid wal record" not in message:
+    if not _is_repairable_graph_store_error(message):
         return False
 
     try:
@@ -191,6 +192,48 @@ def _repair_corrupt_kuzu_wal(error: Exception) -> bool:
                 "Cognee graph WAL repair skipped: graph_file_path is unavailable"
             )
             return False
+
+        shadow_path = _extract_stale_ladybug_shadow_path(str(error))
+        if shadow_path:
+            repair_graph_path = (
+                shadow_path[: -len(".shadow")]
+                if shadow_path.endswith(".shadow")
+                else graph_file_path
+            )
+            eviction_kwargs = _graph_repair_eviction_kwargs(
+                config_kwargs,
+                graph_file_path,
+                repair_graph_path,
+            )
+            for kwargs in eviction_kwargs:
+                try:
+                    evict_graph_engine(**kwargs)
+                except Exception as evict_error:
+                    PrintStyle.warning(
+                        "Cognee graph engine eviction failed before shadow "
+                        f"temp repair: {evict_error}"
+                    )
+
+            moved_paths = _quarantine_paths([shadow_path])
+            for kwargs in eviction_kwargs:
+                try:
+                    evict_graph_engine(**kwargs)
+                except Exception as evict_error:
+                    PrintStyle.warning(
+                        "Cognee graph engine eviction failed after shadow "
+                        f"temp repair: {evict_error}"
+                    )
+            if not moved_paths:
+                PrintStyle.warning(
+                    "Cognee graph shadow temp repair skipped: temp file not found "
+                    f"at {shadow_path}"
+                )
+                return False
+            PrintStyle.warning(
+                "Cognee graph shadow temp file was stale; moved unreadable "
+                f"temp file aside for {repair_graph_path}: {', '.join(moved_paths)}"
+            )
+            return True
 
         wal_paths = _candidate_kuzu_wal_paths(graph_file_path)
         wal_path = next((path for path in wal_paths if os.path.exists(path)), "")
@@ -272,6 +315,24 @@ def _repair_corrupt_kuzu_wal(error: Exception) -> bool:
         return False
 
 
+def _is_repairable_graph_store_error(message: str) -> bool:
+    return (
+        "corrupted wal file" in message
+        or "invalid wal record" in message
+        or (
+            "database id for temporary file" in message
+            and "does not match the current database" in message
+        )
+    )
+
+
+def _extract_stale_ladybug_shadow_path(error_message: str) -> str:
+    match = re.search(r"temporary file ['\"]([^'\"]+\.shadow)['\"]", error_message)
+    if not match:
+        return ""
+    return match.group(1)
+
+
 def _candidate_kuzu_wal_paths(graph_file_path: str) -> list[str]:
     paths = []
     if graph_file_path:
@@ -344,9 +405,13 @@ def _graph_store_paths(graph_path: str, include_graph: bool) -> list[str]:
 
 
 def _quarantine_graph_store_files(graph_path: str, *, include_graph: bool) -> list[str]:
+    return _quarantine_paths(_graph_store_paths(graph_path, include_graph))
+
+
+def _quarantine_paths(paths: list[str]) -> list[str]:
     suffix = f".corrupt.{int(time.time())}.{os.getpid()}"
     moved = []
-    for path in _graph_store_paths(graph_path, include_graph):
+    for path in paths:
         if not os.path.exists(path):
             continue
         repaired_path = f"{path}{suffix}"
