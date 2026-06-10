@@ -224,14 +224,71 @@ def _repair_corrupt_kuzu_wal(error: Exception) -> bool:
                         f"temp repair: {evict_error}"
                     )
             if not moved_paths:
-                PrintStyle.warning(
-                    "Cognee graph shadow temp repair skipped: temp file not found "
-                    f"at {shadow_path}"
+                moved_paths = _quarantine_graph_store_files(
+                    repair_graph_path,
+                    include_graph=True,
                 )
-                return False
+                if not moved_paths:
+                    PrintStyle.warning(
+                        "Cognee graph shadow temp repair skipped: temp file not found "
+                        f"at {shadow_path}"
+                    )
+                    return False
+                PrintStyle.warning(
+                    "Cognee graph shadow temp file was already missing; moved "
+                    "derived graph store aside for rebuild: "
+                    f"{', '.join(moved_paths)}"
+                )
+                return True
             PrintStyle.warning(
                 "Cognee graph shadow temp file was stale; moved unreadable "
                 f"temp file aside for {repair_graph_path}: {', '.join(moved_paths)}"
+            )
+            return True
+
+        missing_shadow_path = _extract_missing_ladybug_shadow_path(str(error))
+        if missing_shadow_path:
+            repair_graph_path = (
+                missing_shadow_path[: -len(".shadow")]
+                if missing_shadow_path.endswith(".shadow")
+                else graph_file_path
+            )
+            eviction_kwargs = _graph_repair_eviction_kwargs(
+                config_kwargs,
+                graph_file_path,
+                repair_graph_path,
+            )
+            for kwargs in eviction_kwargs:
+                try:
+                    evict_graph_engine(**kwargs)
+                except Exception as evict_error:
+                    PrintStyle.warning(
+                        "Cognee graph engine eviction failed before missing "
+                        f"shadow repair: {evict_error}"
+                    )
+
+            moved_paths = _quarantine_graph_store_files(
+                repair_graph_path,
+                include_graph=True,
+            )
+            for kwargs in eviction_kwargs:
+                try:
+                    evict_graph_engine(**kwargs)
+                except Exception as evict_error:
+                    PrintStyle.warning(
+                        "Cognee graph engine eviction failed after missing "
+                        f"shadow repair: {evict_error}"
+                    )
+            if not moved_paths:
+                PrintStyle.warning(
+                    "Cognee graph missing shadow repair skipped: graph store "
+                    f"files not found for {repair_graph_path}"
+                )
+                return False
+            PrintStyle.warning(
+                "Cognee graph shadow temp file was missing; moved derived "
+                "graph store aside for rebuild: "
+                f"{', '.join(moved_paths)}"
             )
             return True
 
@@ -323,6 +380,11 @@ def _is_repairable_graph_store_error(message: str) -> bool:
             "database id for temporary file" in message
             and "does not match the current database" in message
         )
+        or (
+            "cannot open file" in message
+            and ".shadow" in message
+            and "no such file or directory" in message
+        )
     )
 
 
@@ -331,6 +393,18 @@ def _extract_stale_ladybug_shadow_path(error_message: str) -> str:
     if not match:
         return ""
     return match.group(1)
+
+
+def _extract_missing_ladybug_shadow_path(error_message: str) -> str:
+    match = re.search(
+        r"cannot open file\s+['\"]?([^'\"\n]+?\.shadow)['\"]?:\s+"
+        r"no such file or directory",
+        error_message,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return match.group(1).strip()
 
 
 def _candidate_kuzu_wal_paths(graph_file_path: str) -> list[str]:

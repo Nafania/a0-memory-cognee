@@ -595,6 +595,87 @@ class CogneeGraphCacheTest(unittest.TestCase):
             )
             self.assertEqual(evictions[0]["graph_file_path"], context_graph_path)
 
+    def test_repair_unreadable_graph_quarantines_missing_ladybug_shadow_store(self):
+        cache_clear_calls: list[str] = []
+        cognee_graph = _load_cognee_graph_module(cache_clear_calls)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            context_graph_path = os.path.join(temp_dir, "dataset", "eba921c6.pkl")
+            os.makedirs(os.path.dirname(context_graph_path), exist_ok=True)
+            shadow_path = f"{context_graph_path}.shadow"
+            Path(context_graph_path).write_bytes(b"graph")
+            Path(f"{context_graph_path}.wal.checkpoint").write_bytes(b"checkpoint")
+
+            config_module = types.ModuleType("cognee.infrastructure.databases.graph.config")
+
+            class FakeGraphConfig:
+                def model_dump(self):
+                    return {
+                        "graph_database_provider": "ladybug",
+                        "graph_file_path": context_graph_path,
+                    }
+
+            config_module.get_graph_context_config = lambda: FakeGraphConfig()
+            sys.modules["cognee.infrastructure.databases.graph.config"] = config_module
+
+            graph_engine_module = sys.modules[
+                "cognee.infrastructure.databases.graph.get_graph_engine"
+            ]
+            evictions = []
+            graph_engine_module.evict_graph_engine = (
+                lambda **kwargs: evictions.append(kwargs) or True
+            )
+
+            calls = {"count": 0}
+
+            async def get_graph_engine():
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise RuntimeError(
+                        "Runtime exception: IO exception: Cannot open file "
+                        f"{shadow_path}: No such file or directory"
+                    )
+
+                class FakeGraphEngine:
+                    async def is_empty(self):
+                        return True
+
+                return FakeGraphEngine()
+
+            sys.modules["cognee.infrastructure.databases.graph"].get_graph_engine = (
+                get_graph_engine
+            )
+
+            class FakeDatasets:
+                async def list_datasets(self):
+                    return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+                async def list_data(self, dataset_id):
+                    return [types.SimpleNamespace(id="data-id")]
+
+            fake_cognee = types.SimpleNamespace(datasets=FakeDatasets())
+
+            results = asyncio.run(
+                cognee_graph.read_dataset_graphs(
+                    fake_cognee,
+                    ["default"],
+                    skip_empty_data=False,
+                    repair_unreadable=True,
+                    include_graph_data=False,
+                )
+            )
+
+            self.assertEqual(calls["count"], 2)
+            self.assertTrue(results[0].graph_empty)
+            self.assertFalse(os.path.exists(context_graph_path))
+            self.assertFalse(os.path.exists(f"{context_graph_path}.wal.checkpoint"))
+            self.assertFalse(os.path.exists(shadow_path))
+            self.assertEqual(
+                len(list(Path(os.path.dirname(context_graph_path)).glob("*.corrupt.*"))),
+                2,
+            )
+            self.assertEqual(evictions[0]["graph_file_path"], context_graph_path)
+
 
 if __name__ == "__main__":
     unittest.main()
