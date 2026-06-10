@@ -21,7 +21,11 @@ from typing import Any, Callable, Set
 
 from helpers.defer import DeferredTask, THREAD_BACKGROUND
 from helpers.print_style import PrintStyle
-from .cognee_graph import _repair_corrupt_kuzu_wal, read_dataset_graphs
+from .cognee_graph import (
+    _is_repairable_graph_store_error,
+    _repair_corrupt_kuzu_wal,
+    read_dataset_graphs,
+)
 from .cognee_init import get_cognee_setting
 from .cognee_ops import run_cognee_operation
 
@@ -1334,7 +1338,7 @@ def _graph_read_errors(dataset_graphs: list[Any] | None) -> list[str]:
 
 def _contains_corrupt_wal_error(errors: list[str]) -> bool:
     details = "; ".join(errors).lower()
-    return "corrupted wal file" in details or "invalid wal record" in details
+    return _is_repairable_graph_store_error(details)
 
 
 class CogneeBackgroundWorker:

@@ -82,6 +82,7 @@ def _load_memory_module(tmp_dir: str, worker: FakeDirtyWorker):
 
     cognee_init = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_init")
     cognee_init.get_cognee_setting = lambda key, default=None: default
+    cognee_init.ensure_cognee_llm_config_current = lambda agent=None: None
 
     background = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_background")
 
@@ -139,7 +140,7 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
             async def find_dataset(dataset_name):
                 return types.SimpleNamespace(id="dataset-id", name=dataset_name)
 
-            async def try_delete_direct(cognee, target, data_id):
+            async def try_delete_direct(cognee, target, data_id, agent=None):
                 return True
 
             memory_module._find_dataset = find_dataset

@@ -125,6 +125,7 @@ async def run_cognee_operation(
     *args,
     timeout: float = _DEFAULT_WAIT_TIMEOUT,
     operation_timeout: float | None = None,
+    a0_agent: Any = None,
     **kwargs,
 ) -> T:
     """Serialize Cognee backend operations across async tasks and threads."""
@@ -142,6 +143,9 @@ async def run_cognee_operation(
     pre_existing_pids = _active_child_pids()
     baseline_pids = pre_existing_pids
     try:
+        from .cognee_init import ensure_cognee_llm_config_current
+
+        ensure_cognee_llm_config_current(a0_agent)
         cleanup_cognee_child_processes(
             f"{label} pre",
             baseline_pids=pre_existing_pids,

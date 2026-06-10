@@ -7,6 +7,7 @@ import json
 import shutil
 import uuid
 import re
+import hashlib
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -68,6 +69,10 @@ _init_running = False
 _init_condition = threading.Condition(threading.RLock())
 _cognee_module = None
 _search_type_class = None
+_llm_config_fingerprint_state: tuple[str, str, str, str] | None = None
+_llm_model_config_cache: dict[
+    tuple[str, str, str], tuple[tuple[int, int] | None, dict[str, Any] | None]
+] = {}
 
 _LANCEDB_OPTIMIZE_FILE_THRESHOLD = 512
 _EMBEDDING_CONFIG_STATE_FILE = "embedding_config_state.json"
@@ -136,11 +141,13 @@ def _ensure_secret_redaction_filter(logger: logging.Logger) -> None:
 
 def reset_cognee_init_state() -> None:
     """Reset cached Cognee module state before reconfiguring the plugin."""
-    global _configured, _cognee_module, _search_type_class
+    global _configured, _cognee_module, _search_type_class, _llm_config_fingerprint_state
 
     _configured = False
     _cognee_module = None
     _search_type_class = None
+    _llm_config_fingerprint_state = None
+    _llm_model_config_cache.clear()
 
 
 def get_cognee_setting(name: str, default: T) -> T:
@@ -510,6 +517,184 @@ def _get_api_key(provider: str, api_keys: dict[str, str] | None = None) -> str:
     return get_settings().get("api_keys", {}).get(provider, "") or ""
 
 
+def _secret_hash(value: str) -> str:
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _llm_config_fingerprint(state: dict[str, str]) -> tuple[str, str, str, str]:
+    return (
+        state.get("llm_provider", ""),
+        state.get("llm_model", ""),
+        state.get("llm_api_base", ""),
+        _secret_hash(state.get("llm_api_key", "")),
+    )
+
+
+def _agent_config_scope(agent: Any = None) -> tuple[str, str]:
+    project_name = ""
+    agent_profile = ""
+    if agent is not None:
+        try:
+            from helpers import projects
+
+            context = getattr(agent, "context", None)
+            project_name = str(projects.get_context_project_name(context) or "")
+        except Exception:
+            project_name = ""
+        try:
+            agent_config = getattr(agent, "config", None)
+            agent_profile = str(getattr(agent_config, "profile", "") or "")
+        except Exception:
+            agent_profile = ""
+    return project_name, agent_profile
+
+
+def _model_config_source_path(plugins_module: Any, agent: Any = None) -> tuple[str, str, str]:
+    project_name, agent_profile = _agent_config_scope(agent)
+    config_name = getattr(plugins_module, "CONFIG_FILE_NAME", "config.json")
+    default_name = getattr(plugins_module, "CONFIG_DEFAULT_FILE_NAME", "default_config.yaml")
+    path = ""
+    try:
+        asset = plugins_module.find_plugin_asset(
+            "_model_config",
+            config_name,
+            project_name=project_name,
+            agent_profile=agent_profile,
+        )
+        if isinstance(asset, dict):
+            path = str(asset.get("path") or "")
+    except Exception:
+        path = ""
+
+    if not path:
+        try:
+            plugin_dir = plugins_module.find_plugin_dir("_model_config")
+            if plugin_dir:
+                path = os.path.join(str(plugin_dir), default_name)
+        except Exception:
+            path = ""
+
+    return project_name, agent_profile, path
+
+
+def _file_cache_token(path: str) -> tuple[int, int] | None:
+    if not path:
+        return None
+    try:
+        stat = os.stat(path)
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
+def _get_cached_model_config(plugins_module: Any, agent: Any = None) -> dict[str, Any]:
+    project_name, agent_profile, source_path = _model_config_source_path(plugins_module, agent)
+    cache_token = _file_cache_token(source_path)
+    cache_key = (project_name, agent_profile, source_path)
+    if source_path and cache_key in _llm_model_config_cache:
+        cached_token, cached_value = _llm_model_config_cache[cache_key]
+        if cached_token == cache_token:
+            return cached_value or {}
+
+    model_cfg = plugins_module.get_plugin_config("_model_config", agent=agent) or {}
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    if source_path:
+        _llm_model_config_cache[cache_key] = (cache_token, model_cfg)
+    return model_cfg
+
+
+def _resolve_llm_config_state(agent: Any = None) -> dict[str, str] | None:
+    from helpers import plugins as _plugins
+    import models as _models
+
+    model_cfg = _get_cached_model_config(_plugins, agent=agent)
+    util_cfg = model_cfg.get("utility_model", {})
+    if not isinstance(util_cfg, dict):
+        util_cfg = {}
+
+    util_provider = str(util_cfg.get("provider", "") or "").strip()
+    util_model = str(util_cfg.get("name", "") or "").strip()
+    if not util_provider or not util_model:
+        return None
+
+    llm_provider, llm_extra = _resolve_provider_with_defaults(util_provider, "chat")
+    llm_api_key = (
+        str(util_cfg.get("api_key", "") or "")
+        or _models.get_api_key(util_provider)
+        or llm_extra.get("api_key", "")
+    )
+    util_api_base = str(util_cfg.get("api_base", "") or "") or llm_extra.get("api_base", "")
+
+    return {
+        "llm_provider": llm_provider,
+        "llm_model": util_model,
+        "llm_api_key": llm_api_key,
+        "llm_api_base": util_api_base,
+    }
+
+
+def _apply_cognee_llm_config(cognee: Any, state: dict[str, str]) -> None:
+    llm_provider = state.get("llm_provider", "")
+    llm_model = state.get("llm_model", "")
+    llm_api_key = state.get("llm_api_key", "")
+    llm_api_base = state.get("llm_api_base", "")
+
+    os.environ["LLM_PROVIDER"] = llm_provider
+    os.environ["LLM_MODEL"] = llm_model
+    os.environ["LLM_API_KEY"] = llm_api_key
+    if llm_api_base:
+        os.environ["LLM_API_BASE"] = llm_api_base
+        os.environ["LLM_ENDPOINT"] = llm_api_base
+    else:
+        os.environ.pop("LLM_API_BASE", None)
+        os.environ.pop("LLM_ENDPOINT", None)
+
+    cognee.config.set_llm_config(
+        {
+            "llm_provider": llm_provider,
+            "llm_model": llm_model,
+            "llm_api_key": llm_api_key,
+        }
+    )
+    cognee.config.set_llm_endpoint(llm_api_base)
+
+
+def ensure_cognee_llm_config_current(agent: Any = None, cognee: Any = None) -> bool:
+    """Refresh Cognee LLM config from Agent Zero utility model without restart."""
+    global _llm_config_fingerprint_state
+
+    if cognee is None:
+        if _cognee_module is None or not _configured:
+            configure_cognee()
+        cognee = _cognee_module
+    if cognee is None:
+        return False
+
+    state = _resolve_llm_config_state(agent)
+    if state is None:
+        PrintStyle.warning("Cognee: utility_model not configured yet, skipping LLM setup")
+        return False
+
+    fingerprint = _llm_config_fingerprint(state)
+    if fingerprint == _llm_config_fingerprint_state:
+        return False
+
+    previous = _llm_config_fingerprint_state
+    _apply_cognee_llm_config(cognee, state)
+    _llm_config_fingerprint_state = fingerprint
+    if previous is not None:
+        PrintStyle.standard(
+            "Cognee LLM config updated: "
+            f"provider={state.get('llm_provider', '')}, "
+            f"model={state.get('llm_model', '')}, "
+            f"api_base={state.get('llm_api_base', '')}"
+        )
+    return True
+
+
 def configure_cognee() -> None:
     global _configured, _cognee_module, _search_type_class
     if _configured:
@@ -560,46 +745,13 @@ def configure_cognee() -> None:
     _patch_lancedb_remote_table_replay_refs()
 
     # --- Read model config from _model_config plugin ---
-    from helpers import plugins as _plugins
     import models as _models
 
-    model_cfg = _plugins.get_plugin_config("_model_config") or {}
-    util_cfg = model_cfg.get("utility_model", {})
+    model_cfg = importlib.import_module("helpers.plugins").get_plugin_config("_model_config") or {}
     embed_cfg = model_cfg.get("embedding_model", {})
 
-    util_provider = util_cfg.get("provider", "")
-    util_model = util_cfg.get("name", "")
-    if not util_provider or not util_model:
-        PrintStyle.warning("Cognee: utility_model not configured yet, skipping LLM/embedding setup")
-        _configured = True
-        return
-
     # --- LLM ---
-    llm_provider, llm_extra = _resolve_provider_with_defaults(util_provider, "chat")
-    # User-set values in _model_config win over registry defaults (same as Agent Zero's
-    # _merge_provider_defaults which uses setdefault).
-    llm_api_key = (
-        util_cfg.get("api_key", "")
-        or _models.get_api_key(util_provider)
-        or llm_extra.get("api_key", "")
-    )
-    util_api_base = util_cfg.get("api_base", "") or llm_extra.get("api_base", "")
-
-    try:
-        cognee.config.set_llm_config({
-            "llm_provider": llm_provider,
-            "llm_model": util_model,
-            "llm_api_key": llm_api_key,
-        })
-        if util_api_base:
-            cognee.config.set_llm_endpoint(util_api_base)
-    except Exception as e:
-        PrintStyle.error(f"cognee.config LLM setup failed, falling back to env vars: {e}")
-        os.environ["LLM_PROVIDER"] = llm_provider
-        os.environ["LLM_MODEL"] = util_model
-        os.environ["LLM_API_KEY"] = llm_api_key
-        if util_api_base:
-            os.environ["LLM_API_BASE"] = util_api_base
+    ensure_cognee_llm_config_current(cognee=cognee)
 
     # --- Embedding ---
     raw_embed_provider = embed_cfg.get("provider", "")

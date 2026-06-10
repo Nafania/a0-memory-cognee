@@ -70,6 +70,7 @@ def _install_stubs(cognee_module):
 
     cognee_init = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_init")
     cognee_init.get_cognee_setting = lambda key, default=None: default
+    cognee_init.ensure_cognee_llm_config_current = lambda agent=None: None
 
     sys.modules.update(
         {
@@ -1082,6 +1083,70 @@ class CogneeBackgroundTest(unittest.TestCase):
                         error=(
                             "Runtime exception: Corrupted wal file. "
                             "Read out invalid WAL record type."
+                        ),
+                    )
+                ]
+            return [
+                types.SimpleNamespace(
+                    dataset_name="default",
+                    data_count=1,
+                    graph_empty=False,
+                    error=None,
+                )
+            ]
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        background.read_dataset_graphs = read_graphs
+        background._cleanup_cognee_child_processes = (
+            lambda label, **kwargs: calls.append(f"cleanup:{label}")
+        )
+        worker = background.CogneeBackgroundWorker()
+        worker.mark_dirty("default")
+
+        asyncio.run(worker.run_pipeline())
+
+        self.assertEqual(
+            calls[:4],
+            ["preflight-1", "cleanup:default-graph-repair-preflight", "preflight-2", "cognify"],
+        )
+        self.assertTrue(worker.get_status()["last_run_success"])
+
+    def test_stale_shadow_preflight_retries_after_child_cleanup(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = FakeDatasets()
+        calls = []
+
+        async def cognify(**kwargs):
+            calls.append("cognify")
+
+        async def improve(*, dataset):
+            calls.append("improve")
+
+        read_attempts = {"count": 0}
+
+        async def read_graphs(*args, **kwargs):
+            read_attempts["count"] += 1
+            calls.append(f"preflight-{read_attempts['count']}")
+            if read_attempts["count"] == 1:
+                return [
+                    types.SimpleNamespace(
+                        dataset_name="default",
+                        error=(
+                            "Runtime exception: Database ID for temporary file "
+                            "'/a0/usr/cognee/cognee_system/databases/"
+                            "dataset/eba921c6.pkl.shadow' does not match the "
+                            "current database."
                         ),
                     )
                 ]
