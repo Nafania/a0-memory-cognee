@@ -90,6 +90,29 @@ class FaissMigrationTest(unittest.TestCase):
         self.assertEqual(state["indices"]["global:default"]["status"], "error")
         self.assertTrue(saved)
 
+    def test_run_cognify_uses_non_temporal_pipeline_by_default(self):
+        module = _load_faiss_migration_module()
+        calls = []
+
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(name="default")]
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = FakeDatasets()
+
+        async def cognify(**kwargs):
+            calls.append(kwargs)
+
+        fake_cognee.cognify = cognify
+        sys.modules["cognee"] = fake_cognee
+
+        asyncio.run(module.run_cognify([{"memory_subdir": "default"}]))
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["datasets"], ["default"])
+        self.assertFalse(calls[0]["temporal_cognify"])
+
     def test_completed_cleanup_reruns_migration_in_same_startup(self):
         module = _load_faiss_migration_module()
         state = {

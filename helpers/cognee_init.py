@@ -23,7 +23,7 @@ _COGNEE_DEFAULTS: dict[str, Any] = {
     "cognee_search_types": "GRAPH_COMPLETION",
     "cognee_multi_search_enabled": True,
     "cognee_cognify_interval": 5,
-    "cognee_temporal_enabled": True,
+    "cognee_temporal_enabled": False,
     "cognee_memify_enabled": True,
     "cognee_feedback_enabled": True,
     "cognee_session_cache": "filesystem",

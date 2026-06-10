@@ -825,9 +825,45 @@ class CogneeBackgroundTest(unittest.TestCase):
 
         self.assertEqual(len(cognify_kwargs), 1)
         self.assertEqual(cognify_kwargs[0]["datasets"], ["default"])
-        self.assertTrue(cognify_kwargs[0]["temporal_cognify"])
+        self.assertFalse(cognify_kwargs[0]["temporal_cognify"])
         self.assertEqual(cognify_kwargs[0]["data_per_batch"], 1)
         self.assertEqual(cognify_kwargs[0]["chunks_per_batch"], 1)
+
+    def test_background_rebuild_enables_temporal_only_when_configured(self):
+        class FakeDatasets:
+            async def list_datasets(self):
+                return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def list_data(self, dataset_id):
+                return [types.SimpleNamespace(id="data-id")]
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_cognee.datasets = FakeDatasets()
+        cognify_kwargs = []
+
+        async def cognify(**kwargs):
+            cognify_kwargs.append(kwargs)
+
+        async def improve(*, dataset):
+            return None
+
+        fake_cognee.cognify = cognify
+        fake_cognee.improve = improve
+        _install_graph_engine_stub(is_empty=False)
+
+        background = _load_background_module(fake_cognee)
+        background.get_cognee_setting = (
+            lambda key, default=None: True
+            if key == "cognee_temporal_enabled"
+            else default
+        )
+        worker = background.CogneeBackgroundWorker()
+        worker.mark_dirty("default")
+
+        asyncio.run(worker.run_pipeline())
+
+        self.assertEqual(len(cognify_kwargs), 1)
+        self.assertTrue(cognify_kwargs[0]["temporal_cognify"])
 
     def test_embedding_rebuild_uses_bounded_cognify_batches_by_default(self):
         class FakeDatasets:
@@ -905,7 +941,7 @@ class CogneeBackgroundTest(unittest.TestCase):
         self.assertTrue(status["last_run_success"])
         self.assertEqual(status["dirty_datasets"], [])
         self.assertEqual([call[0] for call in calls], ["cognify", "reset", "cognify", "improve"])
-        self.assertTrue(calls[0][1]["temporal_cognify"])
+        self.assertFalse(calls[0][1]["temporal_cognify"])
 
     def test_cognify_preflights_graph_store_before_pipeline(self):
         class FakeDatasets:

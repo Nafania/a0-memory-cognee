@@ -1624,7 +1624,7 @@ class CogneeBackgroundWorker:
         """Load cognee-related settings."""
         return {
             "cognify_interval": get_cognee_setting("cognee_cognify_interval", 5),
-            "temporal_enabled": get_cognee_setting("cognee_temporal_enabled", True),
+            "temporal_enabled": get_cognee_setting("cognee_temporal_enabled", False),
             "memify_enabled": get_cognee_setting("cognee_memify_enabled", True),
             "retry_min_delay": get_cognee_setting("cognee_rebuild_retry_min_seconds", 30),
             "retry_max_delay": get_cognee_setting("cognee_rebuild_retry_max_seconds", 300),
@@ -1812,7 +1812,8 @@ class CogneeBackgroundWorker:
                         PrintStyle.standard(
                             "Cognee rebuild started for dataset: "
                             f"{dataset} "
-                            f"(data_per_batch={data_per_batch or 'cognee-default'}, "
+                            f"(temporal_cognify={bool(config['temporal_enabled'])}, "
+                            f"data_per_batch={data_per_batch or 'cognee-default'}, "
                             f"chunks_per_batch={chunks_per_batch or 'cognee-default'})"
                         )
 

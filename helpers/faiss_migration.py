@@ -13,7 +13,7 @@ import os
 import shutil
 import sys
 
-from .cognee_init import configure_cognee
+from .cognee_init import configure_cognee, get_cognee_setting
 from .cognee_ops import run_cognee_operation
 
 
@@ -345,7 +345,9 @@ async def run_cognify(indices: list[dict]):
                 "cognee.cognify faiss migration",
                 cognee.cognify,
                 datasets=datasets_to_cognify,
-                temporal_cognify=True,
+                temporal_cognify=bool(
+                    get_cognee_setting("cognee_temporal_enabled", False)
+                ),
             )
             _log("  Cognify completed")
         except Exception as e:
