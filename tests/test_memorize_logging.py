@@ -8,7 +8,7 @@ from helpers import llm_json
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONSOLIDATION_RESULTS = None
+QUEUED_JOBS = []
 
 
 class FakeLogItem:
@@ -32,18 +32,9 @@ class FakeAgent:
         return '["one", "two"]["one", "two"]'
 
 
-class FakeConsolidator:
-    def __init__(self):
-        self.index = 0
-
-    async def process_new_memory(self, **kwargs):
-        self.index += 1
-        if CONSOLIDATION_RESULTS is not None:
-            return CONSOLIDATION_RESULTS[self.index - 1]
-        return {"success": True, "memory_ids": [f"mem-{self.index}"]}
-
-
 def _install_stubs():
+    global QUEUED_JOBS
+    QUEUED_JOBS = []
     helpers = types.ModuleType("helpers")
 
     plugins = types.ModuleType("helpers.plugins")
@@ -91,10 +82,22 @@ def _install_stubs():
     Memory.Area = Area
 
     memory.Memory = Memory
-    memory.insert_with_simple_dedup = None
+    memory.insert_with_simple_dedup = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("memorize must enqueue writes, not call Cognee inline")
+    )
 
-    consolidation = types.ModuleType("usr.plugins.memory_cognee.helpers.memory_consolidation")
-    consolidation.create_memory_consolidator = lambda *args, **kwargs: FakeConsolidator()
+    memory_write_worker = types.ModuleType("usr.plugins.memory_cognee.helpers.memory_write_worker")
+
+    class MemoryWriteWorker:
+        @staticmethod
+        def get_instance():
+            return MemoryWriteWorker()
+
+        def enqueue(self, **kwargs):
+            QUEUED_JOBS.append(kwargs)
+            return len(QUEUED_JOBS)
+
+    memory_write_worker.MemoryWriteWorker = MemoryWriteWorker
 
     sys.modules.update(
         {
@@ -108,7 +111,7 @@ def _install_stubs():
             "agent": types.SimpleNamespace(LoopData=dict),
             "usr.plugins.memory_cognee.helpers.memory": memory,
             "usr.plugins.memory_cognee.helpers.llm_json": llm_json,
-            "usr.plugins.memory_cognee.helpers.memory_consolidation": consolidation,
+            "usr.plugins.memory_cognee.helpers.memory_write_worker": memory_write_worker,
         }
     )
 
@@ -139,6 +142,7 @@ class MemorizeLoggingTest(unittest.IsolatedAsyncioTestCase):
                 sys.modules.pop(name, None)
 
     async def test_logs_normalized_json_and_all_memory_ids(self):
+        global QUEUED_JOBS
         module = _load_memorize_memories_module()
         extension = module.MemorizeMemories()
         extension.agent = FakeAgent()
@@ -156,24 +160,12 @@ class MemorizeLoggingTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(log_item.fields["content"], '[\n  "one",\n  "two"\n]')
-        self.assertEqual(log_item.fields["memory_ids"], ["mem-1", "mem-2"])
+        self.assertEqual(log_item.fields["queued_memory_count"], 2)
+        self.assertEqual(log_item.fields["memory_ids"], [])
+        self.assertEqual([job["text"] for job in QUEUED_JOBS], ["one", "two"])
+        self.assertTrue(all(job["use_consolidation"] for job in QUEUED_JOBS))
 
-    async def test_search_unavailable_consolidation_is_not_logged_as_memorized(self):
-        global CONSOLIDATION_RESULTS
-        CONSOLIDATION_RESULTS = [
-            {
-                "success": False,
-                "memory_ids": [],
-                "search_unavailable": True,
-                "reason": "Cognee memory graph rebuild running",
-            },
-            {
-                "success": False,
-                "memory_ids": [],
-                "search_unavailable": True,
-                "reason": "Cognee memory graph rebuild running",
-            },
-        ]
+    async def test_memorize_reports_queued_not_memorized_before_worker_runs(self):
         module = _load_memorize_memories_module()
         extension = module.MemorizeMemories()
         extension.agent = FakeAgent()
@@ -190,7 +182,7 @@ class MemorizeLoggingTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        self.assertIn("skipped", log_item.fields["heading"])
+        self.assertEqual(log_item.fields["heading"], "2 entries queued for memory write.")
         self.assertNotEqual(log_item.fields["heading"], "2 entries memorized.")
 
 

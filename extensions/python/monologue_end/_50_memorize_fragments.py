@@ -1,10 +1,11 @@
 from helpers import plugins, errors
 from helpers.extension import Extension
-from usr.plugins.memory_cognee.helpers.memory import Memory, insert_with_simple_dedup
+from usr.plugins.memory_cognee.helpers.memory import Memory
 from usr.plugins.memory_cognee.helpers.llm_json import (
     format_llm_json_for_log,
     parse_llm_json_response,
 )
+from usr.plugins.memory_cognee.helpers.memory_write_worker import MemoryWriteWorker
 from helpers.dirty_json import DirtyJson
 from agent import LoopData
 from helpers.log import LogItem
@@ -21,15 +22,13 @@ class MemorizeMemories(Extension):
         if not cfg["memory_memorize_enabled"]:
             return
 
-        db = await Memory.get(self.agent, preload_knowledge=False)
-
         log_item = self.agent.context.log.log(
             type="util",
             heading="Memorizing new information...",
         )
 
         task = DeferredTask(thread_name=THREAD_BACKGROUND)
-        task.start_task(self.memorize, loop_data, log_item, db, cfg)
+        task.start_task(self.memorize, loop_data, log_item, None, cfg)
         return task
 
     async def memorize(self, loop_data: LoopData, log_item: LogItem, db: Memory, cfg: dict, **kwargs):
@@ -85,60 +84,26 @@ class MemorizeMemories(Extension):
             use_consolidation = cfg.get("memory_memorize_consolidation", False)
             replace_threshold = cfg.get("memory_memorize_replace_threshold", 0.9)
             area = Memory.Area.FRAGMENTS.value
-
-            if use_consolidation:
-                from usr.plugins.memory_cognee.helpers.memory_consolidation import create_memory_consolidator
-                consolidator = create_memory_consolidator(
-                    self.agent,
+            worker = MemoryWriteWorker.get_instance()
+            queued = 0
+            for memory in memories:
+                queued = worker.enqueue(
+                    agent=self.agent,
+                    text=f"{memory}",
+                    area=area,
+                    metadata={"area": area},
+                    cfg=cfg,
+                    use_consolidation=use_consolidation,
+                    replace_threshold=replace_threshold,
                     similarity_threshold=cfg.get("memory_recall_similarity_threshold", 0.7),
-                    replace_similarity_threshold=replace_threshold,
-                    processing_timeout_seconds=cfg.get("memory_consolidation_timeout_seconds", 30),
-                    keyword_extraction_enabled=cfg.get(
-                        "memory_consolidation_keyword_extraction_enabled",
-                        False,
-                    ),
-                    utility_timeout_seconds=cfg.get("memory_consolidation_utility_timeout_seconds", 10),
                 )
-                memory_ids = []
-                skipped_unavailable = 0
-                unavailable_reason = ""
-                for memory in memories:
-                    txt = f"{memory}"
-                    result = await consolidator.process_new_memory(
-                        new_memory=txt,
-                        area=area,
-                        metadata={"area": area},
-                        log_item=log_item,
-                    )
-                    if result.get("search_unavailable"):
-                        skipped_unavailable += 1
-                        unavailable_reason = result.get("reason", unavailable_reason)
-                    memory_ids.extend(result.get("memory_ids", []))
-            else:
-                memory_ids = []
-                skipped_unavailable = 0
-                unavailable_reason = ""
-                for memory in memories:
-                    txt = f"{memory}"
-                    memory_id = await insert_with_simple_dedup(db, txt, area, replace_threshold)
-                    if memory_id:
-                        memory_ids.append(memory_id)
-
-            if skipped_unavailable and not memory_ids:
-                log_item.update(
-                    result=(
-                        f"{skipped_unavailable} entries skipped; memory search unavailable: "
-                        f"{unavailable_reason}"
-                    ),
-                    heading=f"{skipped_unavailable} entries skipped; memory unavailable.",
-                    memory_ids=[],
-                )
-                return
 
             log_item.update(
-                result=f"{len(memories)} entries memorized.",
-                heading=f"{len(memories)} entries memorized.",
-                memory_ids=memory_ids,
+                result=f"{len(memories)} entries queued for memory write.",
+                heading=f"{len(memories)} entries queued for memory write.",
+                memory_ids=[],
+                queued_memory_count=len(memories),
+                memory_write_queue_size=queued,
             )
 
         except Exception as e:

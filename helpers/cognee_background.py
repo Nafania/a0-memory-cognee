@@ -1403,6 +1403,13 @@ class CogneeBackgroundWorker:
         with self._state_lock:
             self._last_activity_time = time.monotonic()
 
+    def is_memory_idle(self, idle_seconds: float) -> bool:
+        """Return True when no user-path memory activity is recent."""
+        with self._state_lock:
+            if self._running:
+                return False
+            return (time.monotonic() - self._last_activity_time) >= float(idle_seconds)
+
     def mark_datasets_readable(
         self,
         dataset_names: list[str],
