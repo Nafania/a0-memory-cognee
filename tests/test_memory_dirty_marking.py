@@ -32,6 +32,13 @@ def _load_memory_module(tmp_dir: str, worker: FakeDirtyWorker):
     files = types.ModuleType("helpers.files")
     files.get_abs_path = lambda *parts: os.path.join(tmp_dir, *parts)
 
+    projects = types.ModuleType("helpers.projects")
+    projects.get_context_project_name = lambda context: ""
+    projects.load_project_header = lambda project_name: {}
+
+    plugins = types.ModuleType("helpers.plugins")
+    plugins.get_plugin_config = lambda name, agent=None: {}
+
     print_style = types.ModuleType("helpers.print_style")
 
     class PrintStyle:
@@ -97,6 +104,8 @@ def _load_memory_module(tmp_dir: str, worker: FakeDirtyWorker):
         {
             "helpers": helpers,
             "helpers.files": files,
+            "helpers.projects": projects,
+            "helpers.plugins": plugins,
             "helpers.print_style": print_style,
             "helpers.log": log,
             "agent": types.SimpleNamespace(Agent=object, AgentContext=object),
@@ -176,6 +185,29 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
 
             self.assertEqual(fake_cognee.added, [("knowledge text", "default", ["main"])])
             self.assertEqual(worker.dirty, ["default"])
+
+    def test_get_can_skip_preload_for_read_only_paths(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+
+            memory_module._get_cognee = lambda: (_ for _ in ()).throw(
+                AssertionError("read-only Memory.get must not preload knowledge")
+            )
+            agent = types.SimpleNamespace(
+                config=types.SimpleNamespace(knowledge_subdirs=["default"]),
+                context=types.SimpleNamespace(
+                    log=types.SimpleNamespace(log=lambda **kwargs: object()),
+                    streaming_agent=None,
+                    agent0=None,
+                ),
+            )
+
+            mem = asyncio.run(memory_module.Memory.get(agent, preload_knowledge=False))
+
+            self.assertEqual(mem.dataset_name, "default")
+            self.assertEqual(worker.dirty, [])
+            self.assertEqual(memory_module.Memory._initialized_subdirs, set())
 
     def test_search_skips_cognee_when_rebuild_not_ready(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -102,7 +102,7 @@ class RecallMemories(Extension):
             return
         log_item.update(query=query)
 
-        db = await Memory.get(self.agent)
+        db = await Memory.get(self.agent, preload_knowledge=False)
 
         datasets = db.get_search_datasets()
         from usr.plugins.memory_cognee.helpers.cognee_background import (

@@ -328,7 +328,7 @@ class CogneeBackgroundTest(unittest.TestCase):
             ],
         )
 
-    def test_running_rebuild_does_not_block_ready_dataset_search(self):
+    def test_running_rebuild_blocks_search_even_for_ready_dataset(self):
         fake_cognee = types.ModuleType("cognee")
         background = _load_background_module(fake_cognee)
         worker = background.CogneeBackgroundWorker()
@@ -345,7 +345,10 @@ class CogneeBackgroundTest(unittest.TestCase):
                 "Cognee memory graph rebuild running",
             )
 
-        self.assertIsNone(worker.get_search_block_reason(["default"]))
+        self.assertEqual(
+            worker.get_search_block_reason(["default"]),
+            "Cognee memory graph rebuild running for dataset(s): ['projects_alpha']",
+        )
 
     def test_dirty_ready_dataset_keeps_search_readable_while_reindexing(self):
         fake_cognee = types.ModuleType("cognee")

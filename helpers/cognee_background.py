@@ -1461,6 +1461,19 @@ class CogneeBackgroundWorker:
         rebuilding: list[str] = []
         failed: list[str] = []
         with self._state_lock:
+            if self._running:
+                active_rebuilds = sorted(
+                    dataset
+                    for dataset, readiness in self._dataset_readiness.items()
+                    if str(readiness.get("state") or "") == "rebuilding"
+                )
+                if not active_rebuilds:
+                    active_rebuilds = sorted(
+                        set(self._last_run_datasets or []) | set(self._dirty_datasets)
+                    )
+                detail = f" for dataset(s): {active_rebuilds}" if active_rebuilds else ""
+                return f"Cognee memory graph rebuild running{detail}"
+
             for dataset in clean_datasets:
                 readiness = self._dataset_readiness.get(dataset, {})
                 state = str(readiness.get("state") or "")

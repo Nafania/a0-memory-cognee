@@ -93,11 +93,11 @@ class Memory:
     SEARCH_TIMEOUT = 15
 
     @staticmethod
-    async def get(agent: Agent) -> "Memory":
+    async def get(agent: Agent, preload_knowledge: bool = True) -> "Memory":
         memory_subdir = get_agent_memory_subdir(agent)
         dataset_name = _subdir_to_dataset(memory_subdir)
         mem = Memory(dataset_name=dataset_name, memory_subdir=memory_subdir, agent=agent)
-        if memory_subdir not in Memory._initialized_subdirs:
+        if preload_knowledge and memory_subdir not in Memory._initialized_subdirs:
             Memory._initialized_subdirs.add(memory_subdir)
             knowledge_subdirs = get_knowledge_subdirs_by_memory_subdir(
                 memory_subdir, agent.config.knowledge_subdirs or []

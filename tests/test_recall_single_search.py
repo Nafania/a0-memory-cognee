@@ -211,9 +211,11 @@ class FakeMemory:
 
     dataset_name = "default"
     memory_subdir = "default"
+    get_calls = []
 
     @staticmethod
-    async def get(agent):
+    async def get(agent, **kwargs):
+        FakeMemory.get_calls.append(kwargs)
         return FakeMemory()
 
     def get_search_datasets(self):
@@ -236,6 +238,7 @@ def _install_stubs(
     split_calls: list,
     block_reason=None,
 ):
+    FakeMemory.get_calls = []
     helpers = types.ModuleType("helpers")
     extension = types.ModuleType("helpers.extension")
     plugins = types.ModuleType("helpers.plugins")
@@ -730,6 +733,7 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_cognee.recall_calls, [])
         self.assertEqual(len(fake_cognee.search_calls), 1)
         self.assertEqual(fake_cognee.search_calls[0]["query_type"], "CHUNKS")
+        self.assertEqual(module.Memory.get_calls[0], {"preload_knowledge": False})
         self.assertEqual(fake_cognee.search_calls[0]["node_name"], ["main", "fragments", "solutions"])
         self.assertIs(fake_cognee.search_calls[0]["only_context"], True)
         self.assertIs(fake_cognee.search_calls[0]["verbose"], True)

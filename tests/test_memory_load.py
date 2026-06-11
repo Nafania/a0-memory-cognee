@@ -43,8 +43,11 @@ def _load_memory_load_module(search_error_message: str | None = None):
         pass
 
     class Memory:
+        get_calls = []
+
         @staticmethod
-        async def get(agent):
+        async def get(agent, **kwargs):
+            Memory.get_calls.append(kwargs)
             return Memory()
 
         async def search_similarity_threshold(self, **kwargs):
@@ -106,6 +109,7 @@ class MemoryLoadTest(unittest.TestCase):
 
         self.assertIn("Memory search unavailable", response.message)
         self.assertIn("Cognee memory graph rebuild failed", response.message)
+        self.assertEqual(module.Memory.get_calls[0], {"preload_knowledge": False})
 
 
 if __name__ == "__main__":
