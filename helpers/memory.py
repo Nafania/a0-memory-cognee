@@ -310,6 +310,8 @@ class Memory:
                 only_context=True,
                 # Cognee verbose controls result shape: objects_result carries node metadata.
                 verbose=True,
+                timeout=self.SEARCH_TIMEOUT,
+                operation_timeout=self.SEARCH_TIMEOUT,
                 a0_agent=self.agent,
             )
         except Exception as e:

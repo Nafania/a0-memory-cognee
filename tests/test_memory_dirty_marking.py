@@ -306,6 +306,50 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
             self.assertEqual(len(fake_cognee.search_calls), 1)
             self.assertIs(fake_cognee.search_calls[0]["verbose"], True)
 
+    def test_similarity_search_uses_short_user_path_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+
+            class NodeSet:
+                pass
+
+            node_set_module = types.ModuleType("cognee.modules.engine.models.node_set")
+            node_set_module.NodeSet = NodeSet
+            sys.modules["cognee.modules.engine.models.node_set"] = node_set_module
+
+            class FakeCognee:
+                async def search(self, **kwargs):
+                    return [{"search_result": "stored memory", "dataset_name": "default"}]
+
+            captured = {}
+
+            async def run_operation(label, operation, *args, **kwargs):
+                captured.update(kwargs)
+                op_kwargs = dict(kwargs)
+                op_kwargs.pop("timeout", None)
+                op_kwargs.pop("operation_timeout", None)
+                op_kwargs.pop("a0_agent", None)
+                return await operation(*args, **op_kwargs)
+
+            memory_module._get_cognee = lambda: (FakeCognee(), None)
+            memory_module.run_cognee_operation = run_operation
+
+            memory = memory_module.Memory("default", "default")
+            asyncio.run(
+                memory.search_similarity_threshold(
+                    query="test",
+                    limit=5,
+                    threshold=0.7,
+                )
+            )
+
+            self.assertEqual(captured.get("timeout"), memory_module.Memory.SEARCH_TIMEOUT)
+            self.assertEqual(
+                captured.get("operation_timeout"),
+                memory_module.Memory.SEARCH_TIMEOUT,
+            )
+
     def test_similarity_search_defaults_to_memory_node_sets(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker = FakeDirtyWorker()

@@ -209,6 +209,7 @@ class FakeMemory:
         FRAGMENTS = AreaValue("fragments")
         SOLUTIONS = AreaValue("solutions")
 
+    SEARCH_TIMEOUT = 15
     dataset_name = "default"
     memory_subdir = "default"
     get_calls = []
@@ -425,6 +426,30 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("memory_feedback_items", log_item.fields)
         self.assertEqual(log_item.fields["heading"], "1 memories and 1 relevant solutions found")
 
+    async def test_recall_chunk_search_uses_short_user_path_timeout(self):
+        fake_cognee = FakeCognee()
+        split_calls = []
+        module = _load_recall_module(fake_cognee, split_calls)
+        captured = {}
+
+        async def run_operation(label, operation, *args, **kwargs):
+            captured.update(kwargs)
+            op_kwargs = dict(kwargs)
+            op_kwargs.pop("timeout", None)
+            op_kwargs.pop("operation_timeout", None)
+            op_kwargs.pop("a0_agent", None)
+            return await operation(*args, **op_kwargs)
+
+        module.run_cognee_operation = run_operation
+
+        extension = module.RecallMemories()
+        extension.agent = FakeAgent()
+
+        await extension.search_memories(FakeLogItem(), FakeLoopData())
+
+        self.assertEqual(captured.get("timeout"), module.Memory.SEARCH_TIMEOUT)
+        self.assertEqual(captured.get("operation_timeout"), module.Memory.SEARCH_TIMEOUT)
+
     async def test_recall_query_uses_raw_user_message_not_prompt_wrapper(self):
         fake_cognee = FakeCognee()
         split_calls = []
@@ -598,6 +623,36 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(log_item.fields["query_prep_raw"], "")
         self.assertIn("query-prep returned no query", log_item.fields["query_prep_fallback"])
 
+    async def test_recall_times_out_query_prep_and_uses_current_context_fallback(self):
+        fake_cognee = FakeCognee()
+        split_calls = []
+        module = _load_recall_module(fake_cognee, split_calls)
+
+        cfg = sys.modules["helpers.plugins"].get_plugin_config("memory_cognee")
+        cfg["memory_recall_query_prep_timeout_seconds"] = 0.01
+
+        extension = module.RecallMemories()
+        extension.agent = FakeAgent()
+
+        async def slow_utility_model(*, system, message):
+            await asyncio.sleep(0.05)
+            return "late prepared query"
+
+        extension.agent.call_utility_model = slow_utility_model
+        log_item = FakeLogItem()
+
+        await extension.search_memories(log_item, FakeLoopData())
+
+        self.assertEqual(len(fake_cognee.search_calls), 1)
+        query = fake_cognee.search_calls[0]["query_text"]
+        self.assertIn("debug memory search", query)
+        self.assertIn("previous raw user message", query)
+        self.assertNotIn("late prepared query", query)
+        self.assertEqual(
+            log_item.fields["query_prep_fallback"],
+            "query-prep failed; using current message/history fallback",
+        )
+
     async def test_recall_debug_logs_query_prep_and_cognee_args(self):
         fake_cognee = FakeCognee()
         split_calls = []
@@ -768,6 +823,7 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
 
         cfg = sys.modules["helpers.plugins"].get_plugin_config("memory_cognee")
         cfg["memory_recall_timeout_seconds"] = 123
+        cfg["memory_recall_query_prep"] = False
         timeouts = []
         original_wait_for = module.asyncio.wait_for
 
@@ -784,7 +840,7 @@ class RecallSingleSearchTest(unittest.IsolatedAsyncioTestCase):
             task = extension.agent.get_data(module.DATA_NAME_TASK)
             await task
 
-            self.assertEqual(timeouts, [123.0])
+            self.assertEqual(timeouts, [123.0, module.Memory.SEARCH_TIMEOUT])
             self.assertEqual(len(fake_cognee.search_calls), 1)
         finally:
             module.asyncio.wait_for = original_wait_for

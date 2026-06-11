@@ -8,6 +8,7 @@ memory_recall_memories_max_result: 5
 memory_recall_solutions_max_result: 3
 memory_recall_similarity_threshold: 0.7
 memory_recall_query_prep: true
+memory_recall_query_prep_timeout_seconds: 10
 memory_recall_timeout_seconds: 180
 memory_session_enabled: true
 memory_memorize_enabled: true

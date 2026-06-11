@@ -11,6 +11,7 @@ from usr.plugins.memory_cognee.helpers.cognee_ops import run_cognee_operation
 DATA_NAME_TASK = "_recall_memories_task"
 DATA_NAME_ITER = "_recall_memories_iter"
 DEFAULT_SEARCH_TIMEOUT_SECONDS = 180
+DEFAULT_QUERY_PREP_TIMEOUT_SECONDS = 10
 AREA_FILTER_OVERFETCH_FACTOR = 3
 AREA_FILTER_MAX_TOP_K = 100
 QUERY_METADATA_KEYS = {
@@ -158,6 +159,8 @@ class RecallMemories(Extension):
                 session_id=session_id,
                 only_context=True,
                 verbose=True,
+                timeout=Memory.SEARCH_TIMEOUT,
+                operation_timeout=Memory.SEARCH_TIMEOUT,
                 a0_agent=self.agent,
             )
             mem_answers, sol_answers = split_recall_answers_by_area(
@@ -242,6 +245,19 @@ def _recall_timeout_seconds(cfg: dict) -> float:
         timeout = float(cfg.get("memory_recall_timeout_seconds", DEFAULT_SEARCH_TIMEOUT_SECONDS))
     except (TypeError, ValueError):
         return float(DEFAULT_SEARCH_TIMEOUT_SECONDS)
+    return max(timeout, 0.0)
+
+
+def _query_prep_timeout_seconds(cfg: dict) -> float:
+    try:
+        timeout = float(
+            cfg.get(
+                "memory_recall_query_prep_timeout_seconds",
+                DEFAULT_QUERY_PREP_TIMEOUT_SECONDS,
+            )
+        )
+    except (TypeError, ValueError):
+        return float(DEFAULT_QUERY_PREP_TIMEOUT_SECONDS)
     return max(timeout, 0.0)
 
 
@@ -345,10 +361,15 @@ async def _prepare_recall_query(agent, history, message, cfg, log_item) -> str:
                 history=history_text,
                 message=message_text or "None",
             )
-            query = await agent.call_utility_model(
+            query_task = agent.call_utility_model(
                 system=agent.read_prompt("memory.memories_query.sys.md"),
                 message=prompt_message,
             )
+            query_timeout = _query_prep_timeout_seconds(cfg)
+            if query_timeout > 0:
+                query = await asyncio.wait_for(query_task, timeout=query_timeout)
+            else:
+                query = await query_task
             query = str(query or "").strip()
         except Exception as e:
             log_item.update(
