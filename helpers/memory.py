@@ -91,6 +91,7 @@ class Memory:
     _existing_datasets_ts: float = 0
     _DATASETS_CACHE_TTL = 30
     SEARCH_TIMEOUT = 15
+    WRITE_TIMEOUT = 30
 
     @staticmethod
     async def get(agent: Agent, preload_knowledge: bool = True) -> "Memory":
@@ -383,6 +384,8 @@ class Memory:
                                 cognee.forget,
                                 data_id=item.id,
                                 dataset=target.id,
+                                timeout=self.WRITE_TIMEOUT,
+                                operation_timeout=self.WRITE_TIMEOUT,
                                 a0_agent=self.agent,
                             )
                             removed.append(Document(page_content="", metadata={"id": data_id}))
@@ -434,6 +437,8 @@ class Memory:
                     doc.page_content,
                     dataset_name=self.dataset_name,
                     node_set=[area],
+                    timeout=self.WRITE_TIMEOUT,
+                    operation_timeout=self.WRITE_TIMEOUT,
                     a0_agent=self.agent,
                 )
                 content_id = content_hash_id(doc.page_content, self.dataset_name)
@@ -1054,6 +1059,8 @@ async def _try_delete_direct(cognee, dataset, data_id: str, agent: Agent | None 
             cognee.forget,
             data_id=data_id,
             dataset=dataset.id,
+            timeout=Memory.WRITE_TIMEOUT,
+            operation_timeout=Memory.WRITE_TIMEOUT,
             a0_agent=agent,
         )
         return True
@@ -1094,6 +1101,8 @@ async def _delete_matching_data_items(
                         cognee.forget,
                         data_id=item.id,
                         dataset=target.id,
+                        timeout=Memory.WRITE_TIMEOUT,
+                        operation_timeout=Memory.WRITE_TIMEOUT,
                         a0_agent=agent,
                     )
                     deleted += 1
@@ -1125,6 +1134,8 @@ async def _delete_data_by_id(dataset_name: str, data_id: str, agent: Agent | Non
                     cognee.forget,
                     data_id=item.id,
                     dataset=target.id,
+                    timeout=Memory.WRITE_TIMEOUT,
+                    operation_timeout=Memory.WRITE_TIMEOUT,
                     a0_agent=agent,
                 )
                 return True

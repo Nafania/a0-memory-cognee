@@ -33,9 +33,11 @@ class ConsolidationConfig:
     consolidation_sys_prompt: str = "memory.consolidation.sys.md"
     consolidation_msg_prompt: str = "memory.consolidation.msg.md"
     max_llm_context_memories: int = 5
+    keyword_extraction_enabled: bool = True
     keyword_extraction_sys_prompt: str = "memory.keyword_extraction.sys.md"
     keyword_extraction_msg_prompt: str = "memory.keyword_extraction.msg.md"
-    processing_timeout_seconds: int = 60
+    utility_timeout_seconds: float = 10
+    processing_timeout_seconds: int = 30
     replace_similarity_threshold: float = 0.9
 
 
@@ -152,7 +154,7 @@ class MemoryConsolidator:
                     progress="No similar memories found, inserting new memory",
                 )
             try:
-                db = await Memory.get(self.agent)
+                db = await Memory.get(self.agent, preload_knowledge=False)
                 if 'timestamp' not in metadata:
                     metadata['timestamp'] = self._get_timestamp()
                 memory_id = await db.insert_text(new_memory, metadata)
@@ -191,7 +193,7 @@ class MemoryConsolidator:
                     progress="LLM analysis suggests skipping consolidation",
                 )
             try:
-                db = await Memory.get(self.agent)
+                db = await Memory.get(self.agent, preload_knowledge=False)
                 if 'timestamp' not in metadata:
                     metadata['timestamp'] = self._get_timestamp()
                 memory_id = await db.insert_text(new_memory, metadata)
@@ -278,9 +280,12 @@ class MemoryConsolidator:
         log_item: Optional[LogItem] = None
     ) -> List[Document]:
         """Find similar memories using both semantic similarity and keyword matching."""
-        db = await Memory.get(self.agent)
+        db = await Memory.get(self.agent, preload_knowledge=False)
 
-        search_queries = await self._extract_search_keywords(new_memory, log_item)
+        if self.config.keyword_extraction_enabled:
+            search_queries = await self._extract_search_keywords(new_memory, log_item)
+        else:
+            search_queries = []
 
         all_similar = []
 
@@ -357,11 +362,18 @@ class MemoryConsolidator:
                 memory_content=new_memory
             )
 
-            keywords_response = await self.agent.call_utility_model(
+            keywords_task = self.agent.call_utility_model(
                 system=system_prompt,
                 message=message_prompt,
                 background=True
             )
+            if self.config.utility_timeout_seconds > 0:
+                keywords_response = await asyncio.wait_for(
+                    keywords_task,
+                    timeout=self.config.utility_timeout_seconds,
+                )
+            else:
+                keywords_response = await keywords_task
 
             keywords_json = parse_llm_json_response(keywords_response.strip(), DirtyJson.parse_string)
 
@@ -374,12 +386,7 @@ class MemoryConsolidator:
 
         except Exception as e:
             PrintStyle().warning(f"Keyword extraction failed: {str(e)}")
-            if len(new_memory) <= 200:
-                fallback_content = new_memory
-            else:
-                first_sentence = new_memory.split('.')[0]
-                fallback_content = first_sentence[:200] if len(first_sentence) <= 200 else new_memory[:200]
-            return [fallback_content.strip()]
+            return []
 
     async def _analyze_memory_consolidation(
         self,
@@ -408,12 +415,19 @@ class MemoryConsolidator:
                 new_memory_metadata=json.dumps(context.existing_metadata, indent=2)
             )
 
-            analysis_response = await self.agent.call_utility_model(
+            analysis_task = self.agent.call_utility_model(
                 system=system_prompt,
                 message=message_prompt,
                 callback=None,
                 background=True
             )
+            if self.config.utility_timeout_seconds > 0:
+                analysis_response = await asyncio.wait_for(
+                    analysis_task,
+                    timeout=self.config.utility_timeout_seconds,
+                )
+            else:
+                analysis_response = await analysis_task
 
             result_json = parse_llm_json_response(analysis_response.strip(), DirtyJson.parse_string)
 
@@ -458,7 +472,7 @@ class MemoryConsolidator:
         """Apply the consolidation decisions to the memory database."""
 
         try:
-            db = await Memory.get(self.agent)
+            db = await Memory.get(self.agent, preload_knowledge=False)
 
             consolidated_metadata = self._gather_consolidated_metadata(similar_memories, result, original_metadata)
 
@@ -637,6 +651,8 @@ def create_memory_consolidator(agent: Agent, **config_overrides) -> MemoryConsol
     - replace_similarity_threshold: Safety threshold for REPLACE actions (default 0.9)
     - max_similar_memories: Maximum memories to discover (default 10)
     - max_llm_context_memories: Maximum memories to send to LLM (default 5)
+    - keyword_extraction_enabled: Enable extra keyword LLM/search fanout (default True)
+    - utility_timeout_seconds: Timeout for consolidation utility LLM calls (default 10)
     - processing_timeout_seconds: Timeout for consolidation processing (default 30)
     """
     config = ConsolidationConfig(**config_overrides)

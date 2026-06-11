@@ -248,13 +248,15 @@ class MemoryConsolidationUpdateTest(unittest.TestCase):
         module = _load_consolidation_module()
         consolidator = module.MemoryConsolidator(agent=object())
         captured = []
+        get_calls = []
 
         class FakeDB:
             async def search_similarity_threshold(self, **kwargs):
                 captured.append(kwargs)
                 return []
 
-        async def get_memory(agent):
+        async def get_memory(agent, **kwargs):
+            get_calls.append(kwargs)
             return FakeDB()
 
         async def no_keywords(new_memory, log_item):
@@ -268,7 +270,70 @@ class MemoryConsolidationUpdateTest(unittest.TestCase):
         )
 
         self.assertEqual(result, [])
+        self.assertEqual(get_calls, [{"preload_knowledge": False}])
         self.assertEqual(captured[0]["raise_unavailable"], True)
+
+    def test_find_similar_memories_keyword_timeout_avoids_extra_search(self):
+        module = _load_consolidation_module()
+        calls = []
+
+        class Agent:
+            def read_prompt(self, *args, **kwargs):
+                return "prompt"
+
+            async def call_utility_model(self, **kwargs):
+                await asyncio.sleep(0.05)
+                return '["late keyword"]'
+
+        class FakeDB:
+            async def search_similarity_threshold(self, **kwargs):
+                calls.append(kwargs)
+                return []
+
+        async def get_memory(agent, **kwargs):
+            return FakeDB()
+
+        module.Memory.get = get_memory
+        consolidator = module.MemoryConsolidator(
+            agent=Agent(),
+            config=module.ConsolidationConfig(utility_timeout_seconds=0.01),
+        )
+
+        result = asyncio.run(
+            consolidator._find_similar_memories("new memory", "main", None)
+        )
+
+        self.assertEqual(result, [])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["query"], "new memory")
+
+    def test_process_new_memory_direct_insert_skips_preload_knowledge(self):
+        module = _load_consolidation_module()
+        get_calls = []
+
+        class FakeDB:
+            async def insert_text(self, text, metadata):
+                return "new-id"
+
+        async def get_memory(agent, **kwargs):
+            get_calls.append(kwargs)
+            return FakeDB()
+
+        module.Memory.get = get_memory
+        consolidator = module.MemoryConsolidator(agent=object())
+
+        async def no_similar(new_memory, area, log_item):
+            return []
+
+        consolidator._find_similar_memories = no_similar
+
+        result = asyncio.run(
+            consolidator.process_new_memory("new memory", "fragments", {}, None)
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["memory_ids"], ["new-id"])
+        self.assertEqual(get_calls, [{"preload_knowledge": False}])
 
     def test_process_new_memory_skips_when_search_unavailable(self):
         module = _load_consolidation_module()
@@ -281,7 +346,7 @@ class MemoryConsolidationUpdateTest(unittest.TestCase):
             async def insert_text(self, text, metadata):
                 raise AssertionError("insert should not run while search is unavailable")
 
-        async def get_memory(agent):
+        async def get_memory(agent, **kwargs):
             return FakeDB()
 
         async def no_keywords(new_memory, log_item):

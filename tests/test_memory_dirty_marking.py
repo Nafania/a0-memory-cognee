@@ -450,6 +450,45 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
                     )
                 )
 
+    def test_insert_documents_uses_bounded_write_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+            captured = {}
+
+            class FakeCognee:
+                async def add(self, *args, **kwargs):
+                    return None
+
+            async def run_operation(label, operation, *args, **kwargs):
+                captured.update(kwargs)
+                op_kwargs = dict(kwargs)
+                op_kwargs.pop("timeout", None)
+                op_kwargs.pop("operation_timeout", None)
+                op_kwargs.pop("a0_agent", None)
+                return await operation(*args, **op_kwargs)
+
+            memory_module._get_cognee = lambda: (FakeCognee(), None)
+            memory_module.run_cognee_operation = run_operation
+
+            memory = memory_module.Memory("default", "default")
+            asyncio.run(
+                memory.insert_documents(
+                    [
+                        memory_module.Document(
+                            page_content="stored memory",
+                            metadata={"area": "fragments"},
+                        )
+                    ]
+                )
+            )
+
+            self.assertEqual(captured.get("timeout"), memory_module.Memory.WRITE_TIMEOUT)
+            self.assertEqual(
+                captured.get("operation_timeout"),
+                memory_module.Memory.WRITE_TIMEOUT,
+            )
+
     def test_insert_documents_persists_non_cognee_metadata_by_content_hash(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker = FakeDirtyWorker()

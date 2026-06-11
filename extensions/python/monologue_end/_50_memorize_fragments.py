@@ -21,7 +21,7 @@ class MemorizeMemories(Extension):
         if not cfg["memory_memorize_enabled"]:
             return
 
-        db = await Memory.get(self.agent)
+        db = await Memory.get(self.agent, preload_knowledge=False)
 
         log_item = self.agent.context.log.log(
             type="util",
@@ -92,6 +92,12 @@ class MemorizeMemories(Extension):
                     self.agent,
                     similarity_threshold=cfg.get("memory_recall_similarity_threshold", 0.7),
                     replace_similarity_threshold=replace_threshold,
+                    processing_timeout_seconds=cfg.get("memory_consolidation_timeout_seconds", 30),
+                    keyword_extraction_enabled=cfg.get(
+                        "memory_consolidation_keyword_extraction_enabled",
+                        False,
+                    ),
+                    utility_timeout_seconds=cfg.get("memory_consolidation_utility_timeout_seconds", 10),
                 )
                 memory_ids = []
                 skipped_unavailable = 0

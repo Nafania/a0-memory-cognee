@@ -13,6 +13,9 @@ memory_recall_timeout_seconds: 180
 memory_session_enabled: true
 memory_memorize_enabled: true
 memory_memorize_consolidation: true
+memory_consolidation_timeout_seconds: 30
+memory_consolidation_keyword_extraction_enabled: true
+memory_consolidation_utility_timeout_seconds: 10
 memory_memorize_replace_threshold: 0.9
 cognee_debug_enabled: false
 cognee_operation_timeout_seconds: 1800
