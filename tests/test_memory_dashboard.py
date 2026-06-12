@@ -117,6 +117,21 @@ def _load_dashboard_module(captured: dict, *, node_count: int = 2):
 
     graph_module.read_dataset_graphs = read_dataset_graphs
 
+    cognee_ops = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_ops")
+
+    async def run_cognee_operation(label, operation, *args, **kwargs):
+        captured.setdefault("operation_labels", []).append(label)
+        op_kwargs = dict(kwargs)
+        op_kwargs.pop("timeout", None)
+        op_kwargs.pop("operation_timeout", None)
+        op_kwargs.pop("a0_agent", None)
+        result = operation(*args, **op_kwargs)
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
+
+    cognee_ops.run_cognee_operation = run_cognee_operation
+
     class FakeDatasets:
         async def list_datasets(self):
             return [types.SimpleNamespace(id="dataset-id", name="default")]
@@ -142,6 +157,7 @@ def _load_dashboard_module(captured: dict, *, node_count: int = 2):
             "cognee": fake_cognee,
             "usr.plugins.memory_cognee.helpers.memory": memory,
             "usr.plugins.memory_cognee.helpers.cognee_graph": graph_module,
+            "usr.plugins.memory_cognee.helpers.cognee_ops": cognee_ops,
         }
     )
 

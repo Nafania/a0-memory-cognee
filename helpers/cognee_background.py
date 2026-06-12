@@ -1261,6 +1261,7 @@ async def _run_cognify_with_corrupt_wal_repair(
             **cognify_kwargs,
             timeout=gate_timeout,
             operation_timeout=operation_timeout,
+            priority="background",
         )
 
     try:
@@ -1292,6 +1293,7 @@ async def _preflight_graph_store_for_rebuild(
         repair_unreadable=True,
         include_graph_data=False,
         timeout=gate_timeout,
+        priority="background",
     )
     errors = _graph_read_errors(dataset_graphs)
     if _contains_corrupt_wal_error(errors):
@@ -1308,6 +1310,7 @@ async def _preflight_graph_store_for_rebuild(
             repair_unreadable=True,
             include_graph_data=False,
             timeout=gate_timeout,
+            priority="background",
         )
 
     errors = _graph_read_errors(dataset_graphs)
@@ -1396,7 +1399,7 @@ class CogneeBackgroundWorker:
                 "Cognee memory graph rebuild pending",
                 readable=readable,
             )
-        self._schedule_run_soon(force=not preserve_readable or not readable)
+        self._schedule_run_soon(self._next_idle_rebuild_delay(), force=False)
 
     def mark_activity(self) -> None:
         """Record user-path memory activity so background rebuild waits for idle."""
@@ -1644,6 +1647,10 @@ class CogneeBackgroundWorker:
         """Load cognee-related settings."""
         return {
             "cognify_interval": get_cognee_setting("cognee_cognify_interval", 5),
+            "rebuild_idle_seconds": get_cognee_setting(
+                "memory_consolidation_idle_seconds",
+                60,
+            ),
             "temporal_enabled": get_cognee_setting("cognee_temporal_enabled", False),
             "memify_enabled": get_cognee_setting("cognee_memify_enabled", True),
             "retry_min_delay": get_cognee_setting("cognee_rebuild_retry_min_seconds", 30),
@@ -1658,6 +1665,7 @@ class CogneeBackgroundWorker:
         """Run only when search is unreadable or readable data has been idle."""
         config = self._get_config()
         interval_minutes = config["cognify_interval"]
+        idle_seconds = float(config["rebuild_idle_seconds"])
 
         with self._state_lock:
             dirty_count = len(self._dirty_datasets)
@@ -1669,29 +1677,35 @@ class CogneeBackgroundWorker:
 
         if not dirty_count:
             return False
+        idle_elapsed_seconds = time.monotonic() - last_activity_time
+        if idle_elapsed_seconds < idle_seconds:
+            return False
         if has_unreadable_dirty:
             return True
 
-        time_elapsed_minutes = (time.monotonic() - last_activity_time) / 60
+        time_elapsed_minutes = idle_elapsed_seconds / 60
         return time_elapsed_minutes >= interval_minutes
 
     def _next_idle_rebuild_delay(self) -> float | None:
         """Return seconds until readable dirty datasets should be checked again."""
         config = self._get_config()
         interval_seconds = float(config["cognify_interval"]) * 60
-        if interval_seconds <= 0:
-            return 0
+        idle_seconds = max(0.0, float(config["rebuild_idle_seconds"]))
 
         with self._state_lock:
             if not self._dirty_datasets:
                 return None
+            elapsed_seconds = time.monotonic() - self._last_activity_time
             has_unreadable_dirty = any(
                 not self._dataset_has_readable_snapshot_locked(dataset)
                 for dataset in self._dirty_datasets
             )
-            if has_unreadable_dirty:
-                return 0
-            elapsed_seconds = time.monotonic() - self._last_activity_time
+
+        idle_remaining = idle_seconds - elapsed_seconds
+        if idle_remaining > 0:
+            return max(1.0, idle_remaining)
+        if has_unreadable_dirty or interval_seconds <= 0:
+            return 0
 
         remaining = interval_seconds - elapsed_seconds
         if remaining <= 0:
@@ -1793,6 +1807,7 @@ class CogneeBackgroundWorker:
                                 )
                             ),
                             operation_timeout=None,
+                            priority="background",
                         )
                         rebuilt_vectors_only = True
                         PrintStyle.standard(
@@ -1824,11 +1839,7 @@ class CogneeBackgroundWorker:
                             cognify_kwargs["data_per_batch"] = data_per_batch
                         if chunks_per_batch is not None:
                             cognify_kwargs["chunks_per_batch"] = chunks_per_batch
-                        cognify_operation_timeout = (
-                            None
-                            if embedding_rebuild_needed
-                            else float(config["operation_timeout"])
-                        )
+                        cognify_operation_timeout = float(config["operation_timeout"])
                         PrintStyle.standard(
                             "Cognee rebuild started for dataset: "
                             f"{dataset} "
@@ -1869,6 +1880,7 @@ class CogneeBackgroundWorker:
                                 dataset=dataset,
                                 timeout=float(config["operation_timeout"]),
                                 operation_timeout=float(config["operation_timeout"]),
+                                priority="background",
                             )
                             PrintStyle.standard(f"Cognee improve completed for dataset: {dataset}")
                         except Exception as e:
@@ -2182,6 +2194,7 @@ async def _verify_cognify_ready(
         skip_empty_data=False,
         repair_unreadable=True,
         include_graph_data=False,
+        priority="background",
         **operation_kwargs,
     )
     if not dataset_graphs:

@@ -23,4 +23,4 @@ class MemoryInit(Extension):
             PrintStyle.warning(f"Cognee knowledge preload readiness check failed: {e}")
             return
 
-        await memory.Memory.get(self.agent)
+        return

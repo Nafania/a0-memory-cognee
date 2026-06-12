@@ -11,7 +11,7 @@ class MemorySave(Tool):
 
         metadata = {"area": area, **kwargs}
 
-        db = await Memory.get(self.agent)
+        db = await Memory.get(self.agent, preload_knowledge=False)
         id = await db.insert_text(text, metadata)
 
         result = self.agent.read_prompt("fw.memory_saved.md", memory_id=id)

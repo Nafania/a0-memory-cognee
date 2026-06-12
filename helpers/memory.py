@@ -134,7 +134,7 @@ class Memory:
     async def reload(agent: Agent) -> "Memory":
         Memory._initialized_subdirs.clear()
         Memory._datasets_cache.clear()
-        return await Memory.get(agent)
+        return await Memory.get(agent, preload_knowledge=True)
 
     def __init__(self, dataset_name: str, memory_subdir: str, agent: Agent | None = None):
         self.dataset_name = dataset_name
@@ -158,7 +158,7 @@ class Memory:
             return Memory._existing_datasets_cache
         try:
             cognee, _ = _get_cognee()
-            all_ds = await cognee.datasets.list_datasets()
+            all_ds = await _list_cognee_datasets(cognee)
             Memory._existing_datasets_cache = {ds.name for ds in all_ds}
             Memory._existing_datasets_ts = now
         except Exception:
@@ -190,7 +190,7 @@ class Memory:
 
         if index:
             try:
-                datasets = await cognee.datasets.list_datasets()
+                datasets = await _list_cognee_datasets(cognee, agent=self.agent)
                 if not datasets:
                     PrintStyle.warning("Cognee DB is empty but index exists — forcing full re-import")
                     if log_item:
@@ -314,6 +314,7 @@ class Memory:
                 timeout=self.SEARCH_TIMEOUT,
                 operation_timeout=self.SEARCH_TIMEOUT,
                 a0_agent=self.agent,
+                priority="user",
             )
         except Exception as e:
             PrintStyle.error(f"cognee.search failed: {e}")
@@ -344,6 +345,7 @@ class Memory:
         docs = await self.search_similarity_threshold(
             query=query, limit=100, threshold=threshold, filter=filter,
             include_default=False,
+            raise_unavailable=True,
         )
         if docs:
             deleted = await _delete_matching_data_items(self.dataset_name, docs, self.agent)
@@ -371,7 +373,12 @@ class Memory:
                     id_set.discard(data_id)
 
             if id_set:
-                data_items = await cognee.datasets.list_data(target.id)
+                data_items = await _list_cognee_data(
+                    cognee,
+                    target.id,
+                    timeout=Memory.WRITE_TIMEOUT,
+                    agent=self.agent,
+                )
                 for item in data_items:
                     if not id_set:
                         break
@@ -440,6 +447,7 @@ class Memory:
                     timeout=self.WRITE_TIMEOUT,
                     operation_timeout=self.WRITE_TIMEOUT,
                     a0_agent=self.agent,
+                    priority="user",
                 )
                 content_id = content_hash_id(doc.page_content, self.dataset_name)
                 persist_metadata(
@@ -1036,11 +1044,43 @@ async def read_data_item_content_async(item) -> str:
     return await asyncio.to_thread(read_data_item_content, item)
 
 
+async def _list_cognee_datasets(
+    cognee,
+    *,
+    timeout: float = Memory.SEARCH_TIMEOUT,
+    agent: Agent | None = None,
+):
+    return await run_cognee_operation(
+        "cognee.datasets.list_datasets",
+        cognee.datasets.list_datasets,
+        timeout=timeout,
+        operation_timeout=timeout,
+        a0_agent=agent,
+    )
+
+
+async def _list_cognee_data(
+    cognee,
+    dataset_id: str,
+    *,
+    timeout: float = Memory.SEARCH_TIMEOUT,
+    agent: Agent | None = None,
+):
+    return await run_cognee_operation(
+        "cognee.datasets.list_data",
+        cognee.datasets.list_data,
+        dataset_id,
+        timeout=timeout,
+        operation_timeout=timeout,
+        a0_agent=agent,
+    )
+
+
 async def _find_dataset(dataset_name: str):
     """Find a Cognee dataset object by name."""
     cognee, _ = _get_cognee()
     try:
-        datasets = await cognee.datasets.list_datasets()
+        datasets = await _list_cognee_datasets(cognee)
         for ds in datasets:
             if ds.name == dataset_name:
                 return ds
@@ -1090,7 +1130,12 @@ async def _delete_matching_data_items(
         if not match_hashes:
             return 0
 
-        data_items = await cognee.datasets.list_data(target.id)
+        data_items = await _list_cognee_data(
+            cognee,
+            target.id,
+            timeout=Memory.WRITE_TIMEOUT,
+            agent=agent,
+        )
         for item in data_items:
             content = await read_data_item_content_async(item)
             item_hash = content_hash_id(content, dataset_name)
@@ -1124,7 +1169,12 @@ async def _delete_data_by_id(dataset_name: str, data_id: str, agent: Agent | Non
         if await _try_delete_direct(cognee, target, data_id, agent):
             return True
 
-        data_items = await cognee.datasets.list_data(target.id)
+        data_items = await _list_cognee_data(
+            cognee,
+            target.id,
+            timeout=Memory.WRITE_TIMEOUT,
+            agent=agent,
+        )
         for item in data_items:
             content = await read_data_item_content_async(item)
             item_hash = content_hash_id(content, dataset_name)
@@ -1164,7 +1214,12 @@ async def _batch_delete_by_ids(
                 remaining.discard(data_id)
 
         if remaining:
-            data_items = await cognee.datasets.list_data(target.id)
+            data_items = await _list_cognee_data(
+                cognee,
+                target.id,
+                timeout=Memory.WRITE_TIMEOUT,
+                agent=agent,
+            )
             for item in data_items:
                 if not remaining:
                     break

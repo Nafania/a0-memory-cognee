@@ -16,6 +16,22 @@ from helpers import dotenv, files
 from helpers.settings import get_settings
 from helpers.print_style import PrintStyle
 
+try:
+    from .cognee_ops import run_cognee_operation
+except ImportError:
+    if __package__:
+        raise
+
+    async def run_cognee_operation(label, operation, *args, **kwargs):
+        op_kwargs = dict(kwargs)
+        op_kwargs.pop("timeout", None)
+        op_kwargs.pop("operation_timeout", None)
+        op_kwargs.pop("a0_agent", None)
+        result = operation(*args, **op_kwargs)
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
+
 T = TypeVar("T")
 
 _COGNEE_DEFAULTS: dict[str, Any] = {
@@ -198,24 +214,43 @@ def _configure_cognee_logging() -> None:
     """Keep Cognee quiet by default; allow full logs through plugin config."""
     level_name = "DEBUG" if is_cognee_debug_enabled() else "WARNING"
     os.environ["LOG_LEVEL"] = level_name
-    if level_name != "DEBUG":
-        os.environ.setdefault("LITELLM_LOG", "ERROR")
-        os.environ.setdefault("LITELLM_SET_VERBOSE", "False")
+    # Plugin debug should expose Cognee/plugin traces, not LiteLLM/http transport
+    # internals. LiteLLM's async logging worker is event-loop scoped and becomes
+    # noisy in Agent Zero background threads when verbose logging is enabled.
+    os.environ.setdefault("LITELLM_LOG", "ERROR")
+    os.environ.setdefault("LITELLM_SET_VERBOSE", "False")
 
     level = getattr(logging, level_name, logging.WARNING)
     _ensure_secret_redaction_filter(logging.getLogger())
     for logger_name in (
         "cognee",
         "GraphCompletionRetriever",
+    ):
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(level)
+        _ensure_secret_redaction_filter(logger)
+
+    # These loggers can emit raw request details or noisy event-loop/watchdog
+    # diagnostics in debug mode. Keep them high-signal even when Cognee debug is on.
+    for logger_name in (
         "litellm",
         "LiteLLM",
         "httpx",
         "httpcore",
         "openai",
         "urllib3",
+        "asyncio",
+        "aiosqlite",
+        "sqlalchemy",
+        "sqlalchemy.engine",
+        "watchdog",
+        "watchdog.observers",
+        "watchdog.observers.inotify_buffer",
+        "DatasetQueue",
+        "ChunksRetriever",
     ):
         logger = logging.getLogger(logger_name)
-        logger.setLevel(level)
+        logger.setLevel(logging.WARNING)
         _ensure_secret_redaction_filter(logger)
 
     # These libraries can dump full LLM request kwargs, including api_key, in
@@ -742,6 +777,7 @@ def configure_cognee() -> None:
 
     _cognee_module = cognee
     _search_type_class = SearchType
+    _configure_cognee_logging()
     _patch_lancedb_remote_table_replay_refs()
 
     # --- Read model config from _model_config plugin ---
@@ -1107,7 +1143,13 @@ async def purge_lancedb_vector_tables_for_dataset_names(
         raise RuntimeError(f"Cannot import cognee to purge LanceDB vectors: {e}") from e
 
     try:
-        all_datasets = await cognee.datasets.list_datasets()
+        timeout = float(get_cognee_setting("cognee_operation_timeout_seconds", 1800))
+        all_datasets = await run_cognee_operation(
+            "cognee.datasets.list_datasets vector purge",
+            cognee.datasets.list_datasets,
+            timeout=timeout,
+            operation_timeout=timeout,
+        )
     except Exception as e:
         PrintStyle.warning(f"Could not list Cognee datasets to purge LanceDB vectors: {e}")
         raise RuntimeError(
@@ -1379,11 +1421,16 @@ async def _detect_datasets_with_unready_graphs() -> set[str]:
         except Exception:
             from .cognee_graph import read_dataset_graphs
 
-        dataset_graphs = await read_dataset_graphs(
+        timeout = float(get_cognee_setting("cognee_operation_timeout_seconds", 1800))
+        dataset_graphs = await run_cognee_operation(
+            "cognee.graph startup readiness detection",
+            read_dataset_graphs,
             cognee,
             skip_empty_data=True,
             repair_unreadable=True,
             include_graph_data=False,
+            timeout=timeout,
+            operation_timeout=timeout,
         )
         for graph in dataset_graphs:
             dataset_id = str(getattr(graph, "dataset_id", "") or "")
@@ -1429,22 +1476,12 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
     """Log a single operator-readable Cognee readiness summary."""
     dirty = sorted(str(name) for name in (worker_status.get("dirty_datasets") or []))
     readiness = worker_status.get("dataset_readiness") or {}
-    blocked_states = []
-    readable_rebuild_states = []
-    if isinstance(readiness, dict):
-        for dataset_name, state in readiness.items():
-            if not isinstance(state, dict):
-                continue
-            state_name = str(state.get("state") or "")
-            if state_name and state_name != "ready" and not state.get("readable"):
-                blocked_states.append(f"{dataset_name}:{state_name}")
-            elif state_name and state_name != "ready":
-                readable_rebuild_states.append(f"{dataset_name}:{state_name}")
 
     running = bool(worker_status.get("running"))
     migration_status = "complete" if migration_completed else "incomplete"
 
     if _embedding_config_rebuild_needed():
+        blocked_states, _, _ = _classify_startup_rebuild_states(dirty, readiness)
         PrintStyle.warning(
             "Cognee startup readiness: BLOCKED; embedding config rebuild is pending. "
             "Dataset graph status was not read during startup to avoid opening Cognee "
@@ -1462,11 +1499,16 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
         except Exception:
             from .cognee_graph import read_dataset_graphs
 
-        dataset_graphs = await read_dataset_graphs(
+        timeout = float(get_cognee_setting("cognee_operation_timeout_seconds", 1800))
+        dataset_graphs = await run_cognee_operation(
+            "cognee.graph startup readiness status",
+            read_dataset_graphs,
             cognee,
             skip_empty_data=True,
             repair_unreadable=False,
             include_graph_data=False,
+            timeout=timeout,
+            operation_timeout=timeout,
         )
     except Exception as e:
         PrintStyle.warning(
@@ -1495,6 +1537,12 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
             unknown.append(dataset_name)
 
     if ready:
+        if isinstance(readiness, dict):
+            for dataset_name in ready:
+                state = readiness.setdefault(dataset_name, {})
+                if isinstance(state, dict):
+                    state["readable"] = True
+                    state.setdefault("state", "ready")
         try:
             from .cognee_background import CogneeBackgroundWorker
 
@@ -1502,23 +1550,12 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
                 ready,
                 "Cognee startup graph readiness verified",
             )
-            if isinstance(readiness, dict):
-                for dataset_name in ready:
-                    state = readiness.setdefault(dataset_name, {})
-                    if isinstance(state, dict):
-                        state["readable"] = True
-                        state.setdefault("state", "ready")
         except Exception as e:
             PrintStyle.warning(f"Could not record Cognee readable datasets: {e}")
 
-    dirty_blocking = []
-    if isinstance(readiness, dict):
-        for dataset_name in dirty:
-            state = readiness.get(dataset_name, {})
-            if not isinstance(state, dict) or not state.get("readable"):
-                dirty_blocking.append(dataset_name)
-    else:
-        dirty_blocking = dirty
+    blocked_states, readable_rebuild_states, dirty_blocking = (
+        _classify_startup_rebuild_states(dirty, readiness)
+    )
 
     graph_blocked = bool(empty or errors or unknown)
     worker_blocked = bool(dirty_blocking or blocked_states)
@@ -1556,6 +1593,43 @@ async def _log_startup_readiness(migration_completed: bool, worker_status: dict)
     )
 
 
+def _classify_startup_rebuild_states(
+    dirty: list[str],
+    readiness: object,
+) -> tuple[list[str], list[str], list[str]]:
+    """Return non-readable states, readable rebuild states, and dirty datasets blocking recall."""
+    blocked_states: list[str] = []
+    readable_rebuild_states: list[str] = []
+    if not isinstance(readiness, dict):
+        return blocked_states, readable_rebuild_states, list(dirty)
+
+    for dataset_name, state in readiness.items():
+        if not isinstance(state, dict):
+            continue
+        state_name = str(state.get("state") or "")
+        if not state_name or state_name == "ready":
+            continue
+        entry = f"{dataset_name}:{state_name}"
+        if state.get("readable"):
+            readable_rebuild_states.append(entry)
+        else:
+            blocked_states.append(entry)
+
+    dirty_blocking = []
+    for dataset_name in dirty:
+        state = readiness.get(dataset_name, {})
+        if not isinstance(state, dict) or not state.get("readable"):
+            dirty_blocking.append(dataset_name)
+    return blocked_states, readable_rebuild_states, dirty_blocking
+
+
+def _dirty_datasets_blocking_recall(worker_status: dict) -> list[str]:
+    dirty = sorted(str(name) for name in (worker_status.get("dirty_datasets") or []))
+    readiness = worker_status.get("dataset_readiness") or {}
+    _, _, dirty_blocking = _classify_startup_rebuild_states(dirty, readiness)
+    return dirty_blocking
+
+
 def _short_list(items: list[str], limit: int = 12) -> list[str]:
     if len(items) <= limit:
         return items
@@ -1580,7 +1654,13 @@ async def _reset_cognify_status_for_datasets(
         return None
 
     try:
-        all_datasets = await cognee.datasets.list_datasets()
+        timeout = float(get_cognee_setting("cognee_operation_timeout_seconds", 1800))
+        all_datasets = await run_cognee_operation(
+            "cognee.datasets.list_datasets reset cognify status",
+            cognee.datasets.list_datasets,
+            timeout=timeout,
+            operation_timeout=timeout,
+        )
     except Exception as e:
         PrintStyle.error(
             f"Could not list datasets to reset cognify status: {e}. "
@@ -1644,7 +1724,13 @@ async def reset_cognify_status_for_dataset_names(dataset_names: list[str]) -> li
         return []
 
     try:
-        all_datasets = await cognee.datasets.list_datasets()
+        timeout = float(get_cognee_setting("cognee_operation_timeout_seconds", 1800))
+        all_datasets = await run_cognee_operation(
+            "cognee.datasets.list_datasets reset named cognify status",
+            cognee.datasets.list_datasets,
+            timeout=timeout,
+            operation_timeout=timeout,
+        )
     except Exception as e:
         PrintStyle.error(f"Could not prepare cognify status reset: {e}")
         return []
@@ -1679,7 +1765,13 @@ async def mark_all_datasets_dirty_for_rebuild(reason: str) -> list[str] | None:
         return None
 
     try:
-        all_datasets = await cognee.datasets.list_datasets()
+        timeout = float(get_cognee_setting("cognee_operation_timeout_seconds", 1800))
+        all_datasets = await run_cognee_operation(
+            "cognee.datasets.list_datasets mark dirty",
+            cognee.datasets.list_datasets,
+            timeout=timeout,
+            operation_timeout=timeout,
+        )
     except Exception as e:
         PrintStyle.error(f"Could not list datasets to resume Cognee rebuild: {e}")
         return None
@@ -1947,11 +2039,18 @@ def run_memory_cognee_init_a0_extension() -> None:
         worker = CogneeBackgroundWorker.get_instance()
         status = worker.get_status()
         asyncio.run(_log_startup_readiness(migrated, status))
-        dirty_datasets = list(status.get("dirty_datasets") or [])
-        if dirty_datasets:
+        status = worker.get_status()
+        dirty_datasets = sorted(str(name) for name in (status.get("dirty_datasets") or []))
+        dirty_blocking = _dirty_datasets_blocking_recall(status)
+        if dirty_blocking:
             PrintStyle.warning(
                 "Cognee memory graph rebuild required before recall; "
-                f"background rebuild pending for dataset(s): {dirty_datasets}"
+                f"background rebuild pending for dataset(s): {dirty_blocking}"
+            )
+        elif dirty_datasets:
+            PrintStyle.standard(
+                "Cognee memory graph rebuild pending for readable dataset(s); "
+                f"recall remains enabled while background rebuild catches up: {dirty_datasets}"
             )
 
     except BaseException as e:

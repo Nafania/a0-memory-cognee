@@ -45,9 +45,11 @@ class FakeAgent:
 
 class FakeMemory:
     dataset_name = "default"
+    get_calls = []
 
     @staticmethod
-    async def get(agent):
+    async def get(agent, **kwargs):
+        FakeMemory.get_calls.append(kwargs)
         return FakeMemory()
 
 
@@ -61,7 +63,7 @@ class FakeCognee:
         return types.SimpleNamespace(status="session_stored")
 
 
-def _load_session_memory(fake_cognee):
+def _load_session_memory(fake_cognee, *, plugin_config=None, background_worker=None):
     helpers = types.ModuleType("helpers")
     plugins = types.ModuleType("helpers.plugins")
     print_style = types.ModuleType("helpers.print_style")
@@ -71,10 +73,14 @@ def _load_session_memory(fake_cognee):
         def warning(*args, **kwargs):
             pass
 
-    plugins.get_plugin_config = lambda name, agent=None: {
+    config = {
         "memory_session_enabled": True,
         "cognee_operation_timeout_seconds": 777,
+        "memory_session_idle_seconds": 0,
     }
+    if plugin_config:
+        config.update(plugin_config)
+    plugins.get_plugin_config = lambda name, agent=None: dict(config)
     print_style.PrintStyle = PrintStyle
 
     package_names = [
@@ -105,6 +111,14 @@ def _load_session_memory(fake_cognee):
 
     memory = types.ModuleType("usr.plugins.memory_cognee.helpers.memory")
     memory.Memory = FakeMemory
+    cognee_background = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_background")
+
+    class CogneeBackgroundWorker:
+        @staticmethod
+        def get_instance():
+            return background_worker
+
+    cognee_background.CogneeBackgroundWorker = CogneeBackgroundWorker
 
     cognee_memory = types.ModuleType("cognee.memory")
 
@@ -124,6 +138,7 @@ def _load_session_memory(fake_cognee):
             "usr.plugins.memory_cognee.helpers.cognee_init": cognee_init,
             "usr.plugins.memory_cognee.helpers.cognee_ops": cognee_ops,
             "usr.plugins.memory_cognee.helpers.memory": memory,
+            "usr.plugins.memory_cognee.helpers.cognee_background": cognee_background,
             "cognee.memory": cognee_memory,
         }
     )
@@ -156,6 +171,7 @@ class SessionMemoryTest(unittest.IsolatedAsyncioTestCase):
         fake_cognee = FakeCognee()
         module = _load_session_memory(fake_cognee)
         agent = FakeAgent()
+        FakeMemory.get_calls = []
 
         ok = await module.remember_session_turn(agent)
 
@@ -172,6 +188,8 @@ class SessionMemoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(operation_name, "cognee.remember session")
         self.assertEqual(operation_kwargs["timeout"], 777.0)
         self.assertEqual(operation_kwargs["operation_timeout"], 777.0)
+        self.assertEqual(operation_kwargs["priority"], "background")
+        self.assertEqual(FakeMemory.get_calls[0], {"preload_knowledge": False})
         self.assertIn(module.DATA_NAME_LAST_SESSION_QA, agent._data)
 
     async def test_remember_session_turn_skips_duplicate_turn(self):
@@ -191,6 +209,39 @@ class SessionMemoryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(question, "how are family names stored?")
         self.assertEqual(answer, "Family names are stored in session.")
+
+    async def test_safe_remember_waits_until_memory_idle(self):
+        class FakeBackgroundWorker:
+            def __init__(self):
+                self.checks = 0
+
+            def is_memory_idle(self, idle_seconds):
+                self.checks += 1
+                return self.checks >= 2
+
+        fake_worker = FakeBackgroundWorker()
+        fake_cognee = FakeCognee()
+        module = _load_session_memory(
+            fake_cognee,
+            plugin_config={"memory_session_idle_seconds": 10},
+            background_worker=fake_worker,
+        )
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        original_sleep = module.asyncio.sleep
+        module.asyncio.sleep = fake_sleep
+
+        try:
+            await module.safe_remember_session_turn(FakeAgent())
+        finally:
+            module.asyncio.sleep = original_sleep
+
+        self.assertEqual(fake_worker.checks, 2)
+        self.assertEqual(sleeps, [2.5])
+        self.assertEqual(len(fake_cognee.remember_calls), 1)
 
 
 if __name__ == "__main__":

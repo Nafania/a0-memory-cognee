@@ -112,14 +112,14 @@ class MemoryInitExtensionTest(unittest.TestCase):
 
         self.assertEqual(calls, [{"preload_knowledge": False}])
 
-    def test_preloads_when_rebuild_not_blocking(self):
+    def test_does_not_preload_on_user_path_when_rebuild_not_blocking(self):
         module, calls = _load_memory_init_module()
         extension = module.MemoryInit()
         extension.agent = object()
 
         asyncio.run(extension.execute())
 
-        self.assertEqual(calls, [{"preload_knowledge": False}, {}])
+        self.assertEqual(calls, [{"preload_knowledge": False}])
 
 
 if __name__ == "__main__":

@@ -87,6 +87,7 @@ def _install_stubs():
     )
 
     memory_write_worker = types.ModuleType("usr.plugins.memory_cognee.helpers.memory_write_worker")
+    deferred_tasks = types.ModuleType("usr.plugins.memory_cognee.helpers.deferred_tasks")
 
     class MemoryWriteWorker:
         @staticmethod
@@ -98,6 +99,8 @@ def _install_stubs():
             return len(QUEUED_JOBS)
 
     memory_write_worker.MemoryWriteWorker = MemoryWriteWorker
+
+    deferred_tasks.track_deferred_task = lambda task: task
 
     sys.modules.update(
         {
@@ -112,6 +115,7 @@ def _install_stubs():
             "usr.plugins.memory_cognee.helpers.memory": memory,
             "usr.plugins.memory_cognee.helpers.llm_json": llm_json,
             "usr.plugins.memory_cognee.helpers.memory_write_worker": memory_write_worker,
+            "usr.plugins.memory_cognee.helpers.deferred_tasks": deferred_tasks,
         }
     )
 

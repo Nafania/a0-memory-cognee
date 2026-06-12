@@ -156,6 +156,15 @@ class CogneeTemporalPromptTest(unittest.TestCase):
         cognee_init._configure_cognee_logging()
 
         self.assertEqual(logging.getLogger("cognee").level, logging.DEBUG)
+        self.assertEqual(os.environ["LITELLM_LOG"], "ERROR")
+        self.assertEqual(os.environ["LITELLM_SET_VERBOSE"], "False")
+        self.assertEqual(logging.getLogger("litellm").level, logging.WARNING)
+        self.assertEqual(logging.getLogger("httpx").level, logging.WARNING)
+        self.assertEqual(logging.getLogger("aiosqlite").level, logging.WARNING)
+        self.assertEqual(logging.getLogger("sqlalchemy.engine").level, logging.WARNING)
+        self.assertEqual(logging.getLogger("watchdog").level, logging.WARNING)
+        self.assertEqual(logging.getLogger("DatasetQueue").level, logging.WARNING)
+        self.assertEqual(logging.getLogger("ChunksRetriever").level, logging.WARNING)
         self.assertEqual(logging.getLogger("instructor").level, logging.WARNING)
         self.assertEqual(
             logging.getLogger("cognee.shared.logging_utils").level,

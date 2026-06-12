@@ -2,6 +2,7 @@ import time as _time
 
 from helpers.api import ApiHandler, Request, Response
 from usr.plugins.memory_cognee.helpers.memory import Memory, get_existing_memory_subdirs, get_context_memory_subdir, read_data_item_content, read_data_item_content_async, parse_node_set_area, hydrate_metadata
+from usr.plugins.memory_cognee.helpers.cognee_ops import run_cognee_operation
 from helpers import files
 from helpers.print_style import PrintStyle
 from langchain_core.documents import Document
@@ -12,6 +13,10 @@ _CACHE_TTL = 60  # seconds
 _SEARCH_THRESHOLD_DEFAULT = 0.7
 _GRAPH_NODE_LIMIT_DEFAULT = 300
 _GRAPH_NODE_LIMIT_MAX = 1000
+
+
+def _memory_search_timeout() -> float:
+    return float(getattr(Memory, "SEARCH_TIMEOUT", 15))
 
 
 def invalidate_dashboard_cache():
@@ -196,13 +201,24 @@ class MemoryDashboard(ApiHandler):
                 import cognee
                 from usr.plugins.memory_cognee.helpers.memory import content_hash_id
 
-                all_datasets = await cognee.datasets.list_datasets()
+                all_datasets = await run_cognee_operation(
+                    "cognee.datasets.list_datasets dashboard",
+                    cognee.datasets.list_datasets,
+                    timeout=_memory_search_timeout(),
+                    operation_timeout=_memory_search_timeout(),
+                )
                 target_names = {memory.dataset_name}
                 for ds in all_datasets:
                     if ds.name not in target_names:
                         continue
                     try:
-                        data_items = await cognee.datasets.list_data(ds.id)
+                        data_items = await run_cognee_operation(
+                            "cognee.datasets.list_data dashboard",
+                            cognee.datasets.list_data,
+                            ds.id,
+                            timeout=_memory_search_timeout(),
+                            operation_timeout=_memory_search_timeout(),
+                        )
                     except Exception as e:
                         PrintStyle.error(f"[MemoryDashboard] Failed to list data for '{ds.name}': {e}")
                         continue
@@ -350,11 +366,15 @@ class MemoryDashboard(ApiHandler):
             memory = await Memory.get_by_subdir(memory_subdir, preload_knowledge=False)
             dataset_names = [memory.dataset_name]
 
-            dataset_graphs = await read_dataset_graphs(
+            dataset_graphs = await run_cognee_operation(
+                "cognee.graph dashboard",
+                read_dataset_graphs,
                 cognee,
                 dataset_names,
                 skip_empty_data=True,
                 repair_unreadable=True,
+                timeout=_memory_search_timeout(),
+                operation_timeout=_memory_search_timeout(),
             )
             graph_errors = [
                 {"dataset": graph.dataset_name, "error": graph.error}

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import hashlib
 from typing import Any
@@ -73,7 +74,7 @@ async def remember_session_turn(agent) -> bool:
     if callable(get_data) and get_data(DATA_NAME_LAST_SESSION_QA) == qa_key:
         return False
 
-    db = await Memory.get(agent)
+    db = await Memory.get(agent, preload_knowledge=False)
     cognee, _ = get_cognee()
     from cognee.memory import QAEntry
 
@@ -94,6 +95,7 @@ async def remember_session_turn(agent) -> bool:
         timeout=operation_timeout,
         operation_timeout=operation_timeout,
         a0_agent=agent,
+        priority="background",
     )
     status = str(getattr(result, "status", "") or "")
     if status == "errored":
@@ -219,9 +221,38 @@ def _qa_key(session_id: str, question: str, answer: str) -> str:
 
 async def safe_remember_session_turn(agent) -> None:
     try:
+        await _wait_until_memory_idle(agent)
         await remember_session_turn(agent)
     except Exception as e:
         try:
             PrintStyle.warning(f"Cognee session memory write failed: {e}")
         except OSError:
             pass
+
+
+async def _wait_until_memory_idle(agent) -> None:
+    cfg = _plugin_config(agent)
+    idle_seconds = _positive_float(
+        cfg.get(
+            "memory_session_idle_seconds",
+            cfg.get("memory_consolidation_idle_seconds"),
+        ),
+        60,
+    )
+    if idle_seconds <= 0:
+        return
+
+    try:
+        from usr.plugins.memory_cognee.helpers.cognee_background import (
+            CogneeBackgroundWorker,
+        )
+
+        worker = CogneeBackgroundWorker.get_instance()
+    except Exception:
+        return
+
+    while True:
+        is_memory_idle = getattr(worker, "is_memory_idle", None)
+        if not callable(is_memory_idle) or is_memory_idle(idle_seconds):
+            return
+        await asyncio.sleep(min(max(idle_seconds / 4, 1), 5))

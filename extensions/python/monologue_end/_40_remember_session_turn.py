@@ -2,6 +2,7 @@ from helpers import plugins
 from helpers.defer import DeferredTask, THREAD_BACKGROUND
 from helpers.extension import Extension
 from agent import LoopData
+from usr.plugins.memory_cognee.helpers.deferred_tasks import track_deferred_task
 from usr.plugins.memory_cognee.helpers.session_memory import safe_remember_session_turn
 
 
@@ -13,4 +14,4 @@ class RememberSessionTurn(Extension):
 
         task = DeferredTask(thread_name=THREAD_BACKGROUND)
         task.start_task(safe_remember_session_turn, self.agent)
-        return task
+        return track_deferred_task(task)

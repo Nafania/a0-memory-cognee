@@ -110,7 +110,10 @@ class MemoryWriteWorker:
                     return
                 try:
                     await self._wait_until_idle(job)
-                    await self._process_job(job)
+                    result = await self._process_job(job)
+                    if not self._result_success(result):
+                        await self._retry_failed_job(job, result)
+                        return
                     with self._state_lock:
                         self._processed_count += 1
                         self._last_error = None
@@ -176,3 +179,22 @@ class MemoryWriteWorker:
             job.replace_threshold,
         )
         return {"success": bool(memory_id), "memory_ids": [memory_id] if memory_id else []}
+
+    def _result_success(self, result: dict[str, Any] | None) -> bool:
+        if not isinstance(result, dict):
+            return False
+        return bool(result.get("success"))
+
+    async def _retry_failed_job(self, job: MemoryWriteJob, result: dict[str, Any] | None) -> None:
+        reason = "Memory write returned unsuccessful result"
+        if isinstance(result, dict):
+            reason = str(result.get("reason") or result.get("error") or reason)
+            if result.get("search_unavailable") and reason:
+                reason = f"search unavailable: {reason}"
+        with self._state_lock:
+            self._queue.appendleft(job)
+            self._last_error = reason
+        PrintStyle.warning(f"Memory write worker job deferred: {reason}")
+        retry_seconds = _cfg_float(job.cfg, "memory_consolidation_retry_seconds", 30)
+        if retry_seconds > 0:
+            await asyncio.sleep(retry_seconds)

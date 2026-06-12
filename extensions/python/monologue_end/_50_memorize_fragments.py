@@ -10,6 +10,7 @@ from helpers.dirty_json import DirtyJson
 from agent import LoopData
 from helpers.log import LogItem
 from helpers.defer import DeferredTask, THREAD_BACKGROUND
+from usr.plugins.memory_cognee.helpers.deferred_tasks import track_deferred_task
 
 
 class MemorizeMemories(Extension):
@@ -29,7 +30,7 @@ class MemorizeMemories(Extension):
 
         task = DeferredTask(thread_name=THREAD_BACKGROUND)
         task.start_task(self.memorize, loop_data, log_item, None, cfg)
-        return task
+        return track_deferred_task(task)
 
     async def memorize(self, loop_data: LoopData, log_item: LogItem, db: Memory, cfg: dict, **kwargs):
         try:

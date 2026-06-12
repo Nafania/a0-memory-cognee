@@ -162,6 +162,7 @@ class RecallMemories(Extension):
                 timeout=Memory.SEARCH_TIMEOUT,
                 operation_timeout=Memory.SEARCH_TIMEOUT,
                 a0_agent=self.agent,
+                priority="user",
             )
             mem_answers, sol_answers = split_recall_answers_by_area(
                 combined_answers,

@@ -70,10 +70,13 @@ def _load_worker_module():
 
     consolidation = types.ModuleType("usr.plugins.memory_cognee.helpers.memory_consolidation")
     consolidation.calls = []
+    consolidation.result = None
 
     class Consolidator:
         async def process_new_memory(self, **kwargs):
             consolidation.calls.append(kwargs)
+            if consolidation.result is not None:
+                return consolidation.result
             return {"success": True, "memory_ids": [f"consolidated:{kwargs['new_memory']}"]}
 
     consolidation.create_memory_consolidator = lambda *args, **kwargs: Consolidator()
@@ -133,7 +136,10 @@ class MemoryWriteWorkerTest(unittest.TestCase):
             text="queued memory",
             area="fragments",
             metadata={"area": "fragments"},
-            cfg={"memory_consolidation_idle_seconds": 0},
+            cfg={
+                "memory_consolidation_idle_seconds": 0,
+                "memory_consolidation_retry_seconds": 0,
+            },
             use_consolidation=True,
             replace_threshold=0.9,
             similarity_threshold=0.7,
@@ -151,7 +157,10 @@ class MemoryWriteWorkerTest(unittest.TestCase):
             text="queued memory",
             area="fragments",
             metadata={"area": "fragments"},
-            cfg={"memory_consolidation_idle_seconds": 0},
+            cfg={
+                "memory_consolidation_idle_seconds": 0,
+                "memory_consolidation_retry_seconds": 0,
+            },
             use_consolidation=True,
             replace_threshold=0.9,
             similarity_threshold=0.7,
@@ -192,6 +201,36 @@ class MemoryWriteWorkerTest(unittest.TestCase):
 
         self.assertTrue(sleeps)
         self.assertEqual(len(consolidation.calls), 1)
+
+    def test_worker_keeps_failed_consolidation_job_for_retry(self):
+        module, consolidation, _background = _load_worker_module()
+        consolidation.result = {
+            "success": False,
+            "memory_ids": [],
+            "search_unavailable": True,
+            "reason": "Cognee memory graph rebuild pending",
+        }
+        worker = module.MemoryWriteWorker()
+        worker.enqueue(
+            agent=object(),
+            text="queued memory",
+            area="fragments",
+            metadata={"area": "fragments"},
+            cfg={
+                "memory_consolidation_idle_seconds": 0,
+                "memory_consolidation_retry_seconds": 0,
+            },
+            use_consolidation=True,
+            replace_threshold=0.9,
+            similarity_threshold=0.7,
+        )
+
+        asyncio.run(worker.run_loop())
+        status = worker.get_status()
+
+        self.assertEqual(status["processed"], 0)
+        self.assertEqual(status["queued"], 1)
+        self.assertIn("Cognee memory graph rebuild pending", status["last_error"])
 
 
 if __name__ == "__main__":

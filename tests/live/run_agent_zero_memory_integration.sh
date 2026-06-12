@@ -91,6 +91,7 @@ FLASK_SECRET_KEY=a0-memory-cognee-live-test-secret
 TOKENIZERS_PARALLELISM=false
 A0_SET_cognee_debug_enabled=true
 A0_SET_cognee_cognify_interval=1
+A0_SET_memory_consolidation_idle_seconds=5
 EOF
 
 cat > "${USR_DIR}/plugins/_model_config/config.json" <<'EOF'

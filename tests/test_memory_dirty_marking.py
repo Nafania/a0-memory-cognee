@@ -427,6 +427,92 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
 
             self.assertEqual(fake_cognee.max_active, 1)
 
+    def test_dataset_lookup_uses_cognee_operation_gate(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+            labels: list[str] = []
+
+            class FakeDatasets:
+                async def list_datasets(self):
+                    return [types.SimpleNamespace(id="dataset-id", name="default")]
+
+            async def run_operation(label, operation, *args, **kwargs):
+                labels.append(label)
+                op_kwargs = dict(kwargs)
+                op_kwargs.pop("timeout", None)
+                op_kwargs.pop("operation_timeout", None)
+                op_kwargs.pop("a0_agent", None)
+                result = operation(*args, **op_kwargs)
+                if asyncio.iscoroutine(result):
+                    return await result
+                return result
+
+            memory_module._get_cognee = lambda: (
+                types.SimpleNamespace(datasets=FakeDatasets()),
+                None,
+            )
+            memory_module.run_cognee_operation = run_operation
+
+            dataset = asyncio.run(memory_module._find_dataset("default"))
+
+            self.assertEqual(dataset.id, "dataset-id")
+            self.assertIn("cognee.datasets.list_datasets", labels)
+
+    def test_data_listing_delete_path_uses_cognee_operation_gate(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = FakeDirtyWorker()
+            memory_module = _load_memory_module(tmp_dir, worker)
+            labels: list[str] = []
+
+            class FakeDatasets:
+                async def list_data(self, dataset_id):
+                    return [
+                        types.SimpleNamespace(
+                            id="item-id",
+                            raw_data_location=None,
+                            name="stored memory",
+                        )
+                    ]
+
+            async def run_operation(label, operation, *args, **kwargs):
+                labels.append(label)
+                op_kwargs = dict(kwargs)
+                op_kwargs.pop("timeout", None)
+                op_kwargs.pop("operation_timeout", None)
+                op_kwargs.pop("a0_agent", None)
+                result = operation(*args, **op_kwargs)
+                if asyncio.iscoroutine(result):
+                    return await result
+                return result
+
+            async def find_dataset(dataset_name):
+                return types.SimpleNamespace(id="dataset-id", name=dataset_name)
+
+            async def try_delete_direct(cognee, target, data_id, agent=None):
+                return False
+
+            memory_module._get_cognee = lambda: (
+                types.SimpleNamespace(
+                    datasets=FakeDatasets(),
+                    forget=lambda **kwargs: None,
+                ),
+                None,
+            )
+            memory_module._find_dataset = find_dataset
+            memory_module._try_delete_direct = try_delete_direct
+            memory_module.run_cognee_operation = run_operation
+
+            deleted = asyncio.run(
+                memory_module._delete_data_by_id(
+                    "default",
+                    memory_module.content_hash_id("stored memory", "default"),
+                )
+            )
+
+            self.assertTrue(deleted)
+            self.assertIn("cognee.datasets.list_data", labels)
+
     def test_insert_text_reports_underlying_cognee_add_error(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker = FakeDirtyWorker()
@@ -488,6 +574,7 @@ class MemoryDirtyMarkingTest(unittest.TestCase):
                 captured.get("operation_timeout"),
                 memory_module.Memory.WRITE_TIMEOUT,
             )
+            self.assertEqual(captured.get("priority"), "user")
 
     def test_insert_documents_persists_non_cognee_metadata_by_content_hash(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

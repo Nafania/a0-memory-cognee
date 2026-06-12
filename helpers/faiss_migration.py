@@ -225,7 +225,13 @@ async def migrate_index(
         state["indices"][index_key] = index_state
         if not dry_run:
             save_state(base_dir, state)
-        return {"subdir": memory_subdir, "total": 0, "migrated": 0, "skipped": False}
+        return {
+            "subdir": memory_subdir,
+            "dataset": dataset_base,
+            "total": 0,
+            "migrated": 0,
+            "skipped": False,
+        }
 
     already_migrated = set(index_state.get("migrated_doc_ids", []))
     index_state["total"] = len(all_docs)
@@ -249,6 +255,7 @@ async def migrate_index(
             save_state(base_dir, state)
         return {
             "subdir": memory_subdir,
+            "dataset": dataset_base,
             "total": len(all_docs),
             "migrated": len(already_migrated),
             "skipped": False,
@@ -316,6 +323,7 @@ async def migrate_index(
 
     return {
         "subdir": memory_subdir,
+        "dataset": dataset_base,
         "total": len(all_docs),
         "migrated": len(already_migrated),
         "skipped": False,
@@ -331,7 +339,10 @@ async def run_cognify(indices: list[dict]):
         datasets.add(subdir_to_dataset(index_info["memory_subdir"]))
 
     try:
-        existing = await cognee.datasets.list_datasets()
+        existing = await run_cognee_operation(
+            "cognee.datasets.list_datasets faiss migration",
+            cognee.datasets.list_datasets,
+        )
         existing_names = {ds.name for ds in existing}
     except Exception:
         existing_names = set()
@@ -412,7 +423,12 @@ def _current_data_dir() -> str:
     return os.path.join(data_dir, "data_storage")
 
 
-async def run_migration(dry_run: bool = False, verify: bool = False, force: bool = False) -> bool:
+async def run_migration(
+    dry_run: bool = False,
+    verify: bool = False,
+    force: bool = False,
+    cleanup: bool = False,
+) -> bool:
     from helpers import files
     base_dir = files.get_abs_path(".")
 
@@ -444,7 +460,7 @@ async def run_migration(dry_run: bool = False, verify: bool = False, force: bool
                 save_state(base_dir, state)
         else:
             _log(f"FAISS->Cognee migration already complete. Data dir: {state.get('data_dir', 'unknown')}")
-            if dry_run:
+            if dry_run or not cleanup:
                 return True
             cleanup_needs_verification = bool(
                 state.get("cleanup_v2_done")
@@ -469,6 +485,18 @@ async def run_migration(dry_run: bool = False, verify: bool = False, force: bool
             state = load_state(base_dir)
             if state.get("completed"):
                 return True
+
+    if state.get("cleanup_v2_pending") and not cleanup:
+        _log(
+            "Legacy FAISS cleanup is pending, but automatic cleanup is disabled "
+            "during Agent Zero startup. Keeping existing Cognee datasets; run "
+            "explicit FAISS migration cleanup if those legacy datasets should be removed."
+        )
+        state["completed"] = True
+        state["cleanup_v2_deferred"] = True
+        if not dry_run:
+            save_state(base_dir, state)
+        return True
 
     indices = find_faiss_indices(base_dir)
     if not indices:
@@ -524,14 +552,17 @@ async def run_migration(dry_run: bool = False, verify: bool = False, force: bool
         _log("\nBacking up FAISS directories...")
         backup_completed_indices(indices, state)
 
-        if not state.get("cleanup_v2_verified_done"):
+        if cleanup and not state.get("cleanup_v2_verified_done"):
             state["cleanup_v2_pending"] = True
             state["cleanup_v2_reimported"] = True
             save_state(base_dir, state)
 
-        await cleanup_backup_datasets(base_dir)
-        cleanup_state = load_state(base_dir)
-        cleanup_complete = bool(cleanup_state.get("cleanup_v2_verified_done"))
+        if cleanup:
+            await cleanup_backup_datasets(base_dir)
+            cleanup_state = load_state(base_dir)
+            cleanup_complete = bool(cleanup_state.get("cleanup_v2_verified_done"))
+        else:
+            cleanup_complete = True
 
         if verify:
             await run_cognify(indices)
@@ -547,6 +578,7 @@ async def run_migration(dry_run: bool = False, verify: bool = False, force: bool
             _log("Re-run to continue from where it left off.")
 
     if all_complete and not dry_run:
+        _mark_migrated_datasets_dirty(results)
         return bool(cleanup_complete)
     return all_complete
 
@@ -567,7 +599,10 @@ async def cleanup_backup_datasets(base_dir: str, *, delete: bool = True) -> bool
     try:
         configure_cognee()
         import cognee
-        all_datasets = await cognee.datasets.list_datasets()
+        all_datasets = await run_cognee_operation(
+            "cognee.datasets.list_datasets faiss cleanup",
+            cognee.datasets.list_datasets,
+        )
         to_delete = [
             ds for ds in all_datasets
             if "_faiss_backup_" in ds.name
@@ -647,6 +682,27 @@ def _mark_cleanup_reimport_pending(state: dict) -> None:
     state.pop("cleanup_v2_verified_done", None)
 
 
+def _mark_migrated_datasets_dirty(results: list[dict]) -> None:
+    touched = sorted(
+        {
+            str(result.get("dataset") or subdir_to_dataset(str(result.get("subdir") or "")))
+            for result in results
+            if not result.get("skipped") and int(result.get("migrated") or 0) > 0
+        }
+    )
+    if not touched:
+        return
+    try:
+        from .cognee_background import CogneeBackgroundWorker
+
+        worker = CogneeBackgroundWorker.get_instance()
+        for dataset in touched:
+            if dataset:
+                worker.mark_dirty(dataset, preserve_readable=False)
+    except Exception as e:
+        _log(f"  Warning: could not mark migrated Cognee datasets dirty: {e}")
+
+
 def migrate():
     """Run the explicit legacy FAISS -> Cognee migration."""
-    asyncio.run(run_migration())
+    asyncio.run(run_migration(cleanup=True))

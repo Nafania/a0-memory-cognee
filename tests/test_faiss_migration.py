@@ -156,10 +156,89 @@ class FaissMigrationTest(unittest.TestCase):
         module.migrate_index = migrate_index
         module.backup_completed_indices = lambda indices, migration_state: None
 
-        completed = asyncio.run(module.run_migration())
+        completed = asyncio.run(module.run_migration(cleanup=True))
 
         self.assertTrue(completed)
         self.assertEqual(calls, ["default"])
+
+    def test_completed_migration_does_not_prepare_cleanup_on_normal_startup(self):
+        module = _load_faiss_migration_module()
+        state = {
+            "version": 1,
+            "completed": True,
+            "data_dir": "/tmp/usr/cognee/data_storage",
+            "indices": {"global:default": {"status": "complete", "total": 1}},
+        }
+        cleanup_calls = []
+
+        module.load_state = lambda base_dir: state
+        module.save_state = lambda base_dir, new_state: state.update(new_state)
+        module._current_data_dir = lambda: "/tmp/usr/cognee/data_storage"
+
+        async def cleanup(base_dir, *, delete=True):
+            cleanup_calls.append(delete)
+            state["completed"] = False
+            state["cleanup_v2_pending"] = True
+            return True
+
+        module.cleanup_backup_datasets = cleanup
+
+        completed = asyncio.run(module.run_migration())
+
+        self.assertTrue(completed)
+        self.assertEqual(cleanup_calls, [])
+        self.assertTrue(state["completed"])
+        self.assertNotIn("cleanup_v2_pending", state)
+
+    def test_successful_startup_migration_marks_imported_datasets_dirty(self):
+        module = _load_faiss_migration_module()
+        state = {"version": 1, "indices": {}, "completed": False}
+        dirty_calls: list[tuple[str, dict]] = []
+        index = {
+            "type": "global",
+            "memory_subdir": "default",
+            "db_dir": "/tmp/usr/memory/default",
+            "index_path": "/tmp/usr/memory/default/index.faiss",
+        }
+
+        background = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_background")
+
+        class CogneeBackgroundWorker:
+            @staticmethod
+            def get_instance():
+                return types.SimpleNamespace(
+                    mark_dirty=lambda dataset, **kwargs: dirty_calls.append((dataset, kwargs))
+                )
+
+        background.CogneeBackgroundWorker = CogneeBackgroundWorker
+        sys.modules["usr.plugins.memory_cognee.helpers.cognee_background"] = background
+
+        module.load_state = lambda base_dir: state
+        module.save_state = lambda base_dir, new_state: state.update(new_state)
+        module._current_data_dir = lambda: "/tmp/usr/cognee/data_storage"
+        module.find_faiss_indices = lambda base_dir: [index]
+        module.backup_completed_indices = lambda indices, migration_state: None
+
+        async def migrate_index(index_info, migration_state, base_dir, dry_run=False):
+            migration_state.setdefault("indices", {})["global:default"] = {
+                "status": "complete",
+                "total": 1,
+            }
+            return {
+                "subdir": "default",
+                "dataset": "default",
+                "total": 1,
+                "migrated": 1,
+                "skipped": False,
+                "status": "complete",
+            }
+
+        module.migrate_index = migrate_index
+
+        completed = asyncio.run(module.run_migration())
+
+        self.assertTrue(completed)
+        self.assertEqual(dirty_calls, [("default", {"preserve_readable": False})])
 
     def test_completed_cleanup_does_not_delete_without_reimport_source(self):
         module = _load_faiss_migration_module()
@@ -185,7 +264,7 @@ class FaissMigrationTest(unittest.TestCase):
 
         module.cleanup_backup_datasets = cleanup
 
-        completed = asyncio.run(module.run_migration())
+        completed = asyncio.run(module.run_migration(cleanup=True))
 
         self.assertFalse(completed)
         self.assertEqual(cleanup_calls, [False])
@@ -341,7 +420,7 @@ class FaissMigrationTest(unittest.TestCase):
         module.cleanup_backup_datasets = cleanup
         module.migrate_index = migrate_index
 
-        completed = asyncio.run(module.run_migration())
+        completed = asyncio.run(module.run_migration(cleanup=True))
 
         self.assertTrue(completed)
         self.assertEqual(cleanup_calls, [True])
@@ -369,7 +448,7 @@ class FaissMigrationTest(unittest.TestCase):
 
         module.cleanup_backup_datasets = cleanup
 
-        completed = asyncio.run(module.run_migration())
+        completed = asyncio.run(module.run_migration(cleanup=True))
 
         self.assertFalse(completed)
         self.assertTrue(state["cleanup_v2_pending"])
@@ -394,7 +473,7 @@ class FaissMigrationTest(unittest.TestCase):
 
         module.cleanup_backup_datasets = cleanup
 
-        completed = asyncio.run(module.run_migration())
+        completed = asyncio.run(module.run_migration(cleanup=True))
 
         self.assertFalse(completed)
         self.assertTrue(state["cleanup_v2_done"])
@@ -436,7 +515,7 @@ class FaissMigrationTest(unittest.TestCase):
         module.migrate_index = migrate_index
         module.cleanup_backup_datasets = cleanup
 
-        completed = asyncio.run(module.run_migration())
+        completed = asyncio.run(module.run_migration(cleanup=True))
 
         self.assertFalse(completed)
         self.assertTrue(state["cleanup_v2_pending"])
@@ -463,7 +542,7 @@ class FaissMigrationTest(unittest.TestCase):
 
         module.cleanup_backup_datasets = cleanup
 
-        completed = asyncio.run(module.run_migration())
+        completed = asyncio.run(module.run_migration(cleanup=True))
 
         self.assertFalse(completed)
         self.assertTrue(state["cleanup_v2_pending"])

@@ -713,6 +713,86 @@ class CogneeInitStartupTest(unittest.TestCase):
             )
         )
 
+    def test_startup_readiness_treats_verified_readable_dirty_as_degraded(self):
+        cognee_init = _load_cognee_init_module()
+        messages: list[tuple[str, str]] = []
+
+        class PrintStyle:
+            @staticmethod
+            def warning(*args, **kwargs):
+                messages.append(("warning", " ".join(str(arg) for arg in args)))
+
+            @staticmethod
+            def error(*args, **kwargs):
+                messages.append(("error", " ".join(str(arg) for arg in args)))
+
+            @staticmethod
+            def standard(*args, **kwargs):
+                messages.append(("standard", " ".join(str(arg) for arg in args)))
+
+        fake_cognee = types.ModuleType("cognee")
+        fake_graph_module = types.ModuleType(
+            "usr.plugins.memory_cognee.helpers.cognee_graph"
+        )
+
+        async def read_dataset_graphs(cognee, dataset_names=None, **kwargs):
+            return [
+                types.SimpleNamespace(
+                    dataset_name="default",
+                    graph_empty=False,
+                    error=None,
+                    data_count=2,
+                )
+            ]
+
+        fake_graph_module.read_dataset_graphs = read_dataset_graphs
+        old_print_style = cognee_init.PrintStyle
+        old_cognee = sys.modules.get("cognee")
+        old_graph = sys.modules.get("usr.plugins.memory_cognee.helpers.cognee_graph")
+        sys.modules["cognee"] = fake_cognee
+        sys.modules["usr.plugins.memory_cognee.helpers.cognee_graph"] = fake_graph_module
+        cognee_init.PrintStyle = PrintStyle
+        try:
+            asyncio.run(
+                cognee_init._log_startup_readiness(
+                    False,
+                    {
+                        "dirty_datasets": ["default"],
+                        "dataset_readiness": {
+                            "default": {"state": "dirty", "readable": False}
+                        },
+                        "running": False,
+                    },
+                )
+            )
+        finally:
+            cognee_init.PrintStyle = old_print_style
+            if old_cognee is None:
+                sys.modules.pop("cognee", None)
+            else:
+                sys.modules["cognee"] = old_cognee
+            if old_graph is None:
+                sys.modules.pop("usr.plugins.memory_cognee.helpers.cognee_graph", None)
+            else:
+                sys.modules[
+                    "usr.plugins.memory_cognee.helpers.cognee_graph"
+                ] = old_graph
+
+        self.assertFalse(
+            any(
+                level == "warning" and "Cognee startup readiness: BLOCKED" in message
+                for level, message in messages
+            )
+        )
+        self.assertTrue(
+            any(
+                level == "warning"
+                and "Cognee startup readiness: DEGRADED" in message
+                and "graphs_ready=1/1" in message
+                for level, message in messages
+            )
+        )
+
     def test_startup_readiness_does_not_open_graph_when_embedding_rebuild_pending(self):
         cognee_init = _load_cognee_init_module()
         messages: list[tuple[str, str]] = []

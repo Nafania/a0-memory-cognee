@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def _load_cognee_init_module(
     order: list[str],
     dirty_datasets: list[str] | None = None,
+    dataset_readiness: dict | None = None,
 ):
     helpers = types.ModuleType("helpers")
     dotenv = types.ModuleType("helpers.dotenv")
@@ -67,7 +68,11 @@ def _load_cognee_init_module(
                 dirty_datasets.clear()
 
             return types.SimpleNamespace(
-                get_status=lambda: {"dirty_datasets": list(dirty_datasets)},
+                get_status=lambda: {
+                    "dirty_datasets": list(dirty_datasets),
+                    "dataset_readiness": dict(dataset_readiness or {}),
+                    "running": False,
+                },
                 run_pipeline=run_pipeline,
                 mark_dirty=lambda dataset_name, **kwargs: order.append(f"dirty:{dataset_name}"),
                 start=lambda: order.append("start"),
@@ -83,6 +88,20 @@ def _load_cognee_init_module(
 
     faiss_migration.run_migration = run_migration
 
+    cognee_ops = types.ModuleType("usr.plugins.memory_cognee.helpers.cognee_ops")
+
+    async def run_cognee_operation(label, operation, *args, **kwargs):
+        op_kwargs = dict(kwargs)
+        op_kwargs.pop("timeout", None)
+        op_kwargs.pop("operation_timeout", None)
+        op_kwargs.pop("a0_agent", None)
+        result = operation(*args, **op_kwargs)
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
+
+    cognee_ops.run_cognee_operation = run_cognee_operation
+
     sys.modules.update(
         {
             "helpers": helpers,
@@ -93,6 +112,7 @@ def _load_cognee_init_module(
             "helpers.print_style": print_style,
             "usr.plugins.memory_cognee.helpers.cognee_background": background,
             "usr.plugins.memory_cognee.helpers.faiss_migration": faiss_migration,
+            "usr.plugins.memory_cognee.helpers.cognee_ops": cognee_ops,
         }
     )
 
@@ -158,6 +178,52 @@ class StartupFaissMigrationTest(unittest.TestCase):
         module.run_memory_cognee_start_worker_extension()
         self.assertEqual(
             order, ["toggle:_memory:False", "configure", "init", "migrate", "start"]
+        )
+
+    def test_init_a0_does_not_warn_rebuild_required_when_dirty_dataset_readable(self):
+        order: list[str] = []
+        warnings: list[str] = []
+        module = _load_cognee_init_module(
+            order,
+            dirty_datasets=["default"],
+            dataset_readiness={"default": {"state": "dirty", "readable": True}},
+        )
+
+        class PrintStyle:
+            @staticmethod
+            def standard(*args, **kwargs):
+                pass
+
+            @staticmethod
+            def warning(*args, **kwargs):
+                warnings.append(" ".join(str(arg) for arg in args))
+
+            @staticmethod
+            def error(*args, **kwargs):
+                pass
+
+        module.PrintStyle = PrintStyle
+        module.configure_cognee = lambda: order.append("configure")
+
+        async def init_cognee():
+            order.append("init")
+            module._cognee_module = object()
+            module._init_done = True
+
+        async def log_startup_readiness(migrated, status):
+            order.append("readiness")
+
+        module.init_cognee = init_cognee
+        module._log_startup_readiness = log_startup_readiness
+
+        module.run_memory_cognee_init_a0_extension()
+
+        self.assertEqual(
+            order,
+            ["toggle:_memory:False", "configure", "init", "migrate", "readiness"],
+        )
+        self.assertFalse(
+            any("rebuild required before recall" in message for message in warnings)
         )
 
     def test_init_a0_skips_builtin_memory_toggle_when_already_disabled(self):
